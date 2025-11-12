@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PayMongo Subscription Demo</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+    button { background: #2563eb; color: #fff; border: 0; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+    button:disabled { opacity: .6; }
+    #log { white-space: pre-wrap; font-size: 12px; color: #111827; background: #f3f4f6; padding: 8px; border-radius: 8px; }
+  </style>
+  <!-- Client-side PayMongo.js (cards). This is safe to load; uses the public key only. -->
+  <script src="https://js.paymongo.com/v2"></script>
+</head>
+<body>
+  <h1>Subscription Demo</h1>
+  <p>This demo fetches plans from /api/plans and creates a Payment Intent for the selected plan.</p>
+
+  <div id="plans"></div>
+
+  <h3>Debug</h3>
+  <div id="log"></div>
+
+  <script>
+    const api = (path, opts = {}) => fetch(`/api/${path}`, {
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      ...opts,
+    }).then(r => r.json())
+
+    const log = (msg, data) => {
+      const el = document.getElementById('log')
+      el.textContent += `\n${msg}`
+      if (data) el.textContent += `\n${JSON.stringify(data, null, 2)}`
+      el.textContent += '\n'
+    }
+
+    async function loadPlans() {
+      const res = await api('plans')
+      const plansDiv = document.getElementById('plans')
+      plansDiv.innerHTML = ''
+      ;(res.data || []).forEach(p => {
+        const d = document.createElement('div')
+        d.className = 'card'
+        d.innerHTML = `<div><strong>${p.plan_name}</strong> — ₱${Number(p.price).toFixed(2)} · ${p.duration_in_months} month(s)</div>`
+        const btn = document.createElement('button')
+        btn.textContent = 'Subscribe (create Payment Intent)'
+        btn.onclick = () => startIntent(p.plan_id)
+        d.appendChild(document.createElement('br'))
+        d.appendChild(btn)
+        plansDiv.appendChild(d)
+      })
+    }
+
+    async function startIntent(planId) {
+      log('Creating payment intent...')
+      const res = await api('payments/paymongo/intent', { method: 'POST', body: JSON.stringify({ plan_id: planId }) })
+      log('Intent response', res)
+      if (!res.success) { alert('Failed to create intent'); return }
+
+      // OPTIONAL: demonstrate creating a test payment method (card: 4343434343434345 etc.).
+      if (!window.Paymongo) { alert('Paymongo.js not loaded'); return }
+
+      // The public key is returned by backend for convenience; you can also hardcode from .env
+      const paymongo = new Paymongo(res.public_key)
+      const pm = await paymongo.createPaymentMethod({
+        type: 'card',
+        details: {
+          card_number: '4343434343434345', // Visa test card
+          exp_month: 12,
+          exp_year: new Date().getFullYear() + 1,
+          cvc: '123',
+        },
+        billing: { name: 'Test User' },
+      })
+      log('Created payment method', pm)
+
+      const conf = await api('payments/paymongo/confirm', {
+        method: 'POST',
+        body: JSON.stringify({
+          payment_intent_id: res.payment_intent_id,
+          payment_method_id: pm.data.id,
+          client_key: res.client_key,
+        }),
+      })
+      log('Confirm response', conf)
+      if (conf.success) alert('Payment processing started. If 3DS is required, PayMongo will redirect/handle it.')
+    }
+
+    loadPlans().catch(e => log('Error loading plans', e))
+  </script>
+</body>
+</html>
