@@ -4,87 +4,62 @@ namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
-use App\Notifications\LoginVerificationCodeNotification;
+use App\Notifications\EmailVerificationCodeNotification;
 use Illuminate\Http\Request;
-use Illuminate\Http\Response;
-use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
+use Illuminate\Http\JsonResponse;
 
 class LoginVerificationController extends Controller
 {
     /**
-     * Verify the login verification code
+     * Verify the 5-digit code and log user in.
      */
-    public function verify(Request $request): Response
+    public function verify(Request $request): JsonResponse
     {
-        $request->validate([
-            'email' => 'required|email',
-            'code' => 'required|string|size:6',
+        $data = $request->validate([
+            'email' => ['required','email'],
+            'code' => ['required','digits:5'],
         ]);
 
-        $user = User::where('email', $request->email)->first();
-
+        $user = User::where('email', $data['email'])->first();
         if (!$user) {
-            throw ValidationException::withMessages([
-                'email' => ['User not found.'],
-            ]);
+            throw ValidationException::withMessages(['email' => ['User not found.']]);
         }
 
-        if (!$user->requires_login_verification) {
-            throw ValidationException::withMessages([
-                'code' => ['No verification required for this account.'],
-            ]);
+        if (!$user->verifyEmailVerificationCode($data['code'])) {
+            throw ValidationException::withMessages(['code' => ['Invalid or expired code.']]);
         }
 
-        if (!$user->hasValidLoginVerificationCode()) {
-            throw ValidationException::withMessages([
-                'code' => ['Verification code has expired. Please request a new one.'],
-            ]);
-        }
-
-        if (!$user->verifyLoginCode($request->code)) {
-            throw ValidationException::withMessages([
-                'code' => ['Invalid verification code.'],
-            ]);
-        }
-
-        // Log the user in
+        // Successful verification -> log them in
         Auth::login($user);
         $request->session()->regenerate();
 
-        return response()->noContent();
+        // First login completed
+        if (!$user->last_login_at) {
+            $user->forceFill(['last_login_at' => now()])->save();
+        }
+
+        return response()->json(['success' => true]);
     }
 
     /**
-     * Resend login verification code
+     * Resend a 5-digit code.
      */
     public function resend(Request $request): JsonResponse
     {
-        $request->validate([
-            'email' => 'required|email',
+        $data = $request->validate([
+            'email' => ['required','email'],
         ]);
 
-        $user = User::where('email', $request->email)->first();
-
+        $user = User::where('email', $data['email'])->first();
         if (!$user) {
-            throw ValidationException::withMessages([
-                'email' => ['User not found.'],
-            ]);
+            throw ValidationException::withMessages(['email' => ['User not found.']]);
         }
 
-        if (!$user->requires_login_verification && $user->is_first_login) {
-            throw ValidationException::withMessages([
-                'email' => ['No verification required for this account.'],
-            ]);
-        }
+        $code = $user->issueEmailVerificationCode();
+        $user->notify(new EmailVerificationCodeNotification($code));
 
-        // Generate and send new verification code
-        $code = $user->generateLoginVerificationCode();
-        $user->notify(new LoginVerificationCodeNotification($code));
-
-        return response()->json([
-            'message' => 'Verification code sent successfully.',
-        ]);
+        return response()->json(['message' => 'Verification code sent.']);
     }
 }

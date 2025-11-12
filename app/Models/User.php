@@ -2,13 +2,11 @@
 
 namespace App\Models;
 
-use Illuminate\Contracts\Auth\MustVerifyEmail as MustVerifyEmailContract;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
-use App\Notifications\EmailVerificationCodeNotification;
 
-class User extends Authenticatable implements MustVerifyEmailContract
+class User extends Authenticatable
 {
     /** @use HasFactory<\\Database\\Factories\\UserFactory> */
     use HasFactory, Notifiable;
@@ -36,14 +34,6 @@ class User extends Authenticatable implements MustVerifyEmailContract
         'enrolled_school',
         'school_year',
         'is_scholar',
-        'is_first_login',
-        'login_verification_code',
-        'login_verification_code_expires_at',
-        'requires_login_verification',
-        'last_login_at',
-        'login_attempt_count',
-        'email_verification_code',
-        'email_verification_code_expires_at',
     ];
 
     /**
@@ -65,14 +55,11 @@ class User extends Authenticatable implements MustVerifyEmailContract
     {
         return [
             'email_verified_at' => 'datetime',
+            'email_verification_code_expires_at' => 'datetime',
+            'last_login_at' => 'datetime',
             'password' => 'hashed',
             'must_change_password' => 'boolean',
             'is_scholar' => 'boolean',
-            'is_first_login' => 'boolean',
-            'login_verification_code_expires_at' => 'datetime',
-            'requires_login_verification' => 'boolean',
-            'last_login_at' => 'datetime',
-            'email_verification_code_expires_at' => 'datetime',
             'birthdate' => 'date',
         ];
     }
@@ -152,6 +139,47 @@ class User extends Authenticatable implements MustVerifyEmailContract
         return $value; // fallback
     }
 
+    /**
+     * Generate or reuse a valid 5-digit email verification code.
+     */
+    public function issueEmailVerificationCode(int $ttlMinutes = 10): string
+    {
+        // Reuse if still valid
+        if ($this->email_verification_code && $this->email_verification_code_expires_at && $this->email_verification_code_expires_at->isFuture()) {
+            return $this->email_verification_code;
+        }
+        $code = str_pad((string) random_int(0, 99999), 5, '0', STR_PAD_LEFT);
+        $this->forceFill([
+            'email_verification_code' => $code,
+            'email_verification_code_expires_at' => now()->addMinutes($ttlMinutes),
+        ])->save();
+        return $code;
+    }
+
+    /** Check if provided code is valid and consume it. */
+    public function verifyEmailVerificationCode(string $code): bool
+    {
+        if (!$this->email_verification_code || !$this->email_verification_code_expires_at) {
+            return false;
+        }
+        if ($this->email_verification_code_expires_at->isPast()) {
+            return false;
+        }
+        if (hash_equals($this->email_verification_code, $code)) {
+            $this->forceFill([
+                'email_verification_code' => null,
+                'email_verification_code_expires_at' => null,
+            ])->save();
+            return true;
+        }
+        return false;
+    }
+
+    public function hasValidEmailVerificationCode(): bool
+    {
+        return (bool) ($this->email_verification_code && $this->email_verification_code_expires_at && $this->email_verification_code_expires_at->isFuture());
+    }
+
     // Subscription-related methods
     public function financialAidSubscriptions()
     {
@@ -187,171 +215,4 @@ class User extends Authenticatable implements MustVerifyEmailContract
             ->first();
     }
 
-    /**
-     * Generate and store a login verification code
-     */
-    public function generateLoginVerificationCode()
-    {
-        $code = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-        
-        $this->update([
-            'login_verification_code' => $code,
-            'login_verification_code_expires_at' => now()->addMinutes(10),
-            'requires_login_verification' => true,
-        ]);
-        
-        return $code;
-    }
-
-    /**
-     * Verify the login verification code
-     */
-    public function verifyLoginCode($code)
-    {
-        if (!$this->login_verification_code || 
-            !$this->login_verification_code_expires_at ||
-            $this->login_verification_code_expires_at->isPast()) {
-            return false;
-        }
-        
-        if ($this->login_verification_code === $code) {
-            $this->update([
-                'login_verification_code' => null,
-                'login_verification_code_expires_at' => null,
-                'requires_login_verification' => false,
-                'is_first_login' => false,
-                'last_login_at' => now(),
-                'login_attempt_count' => $this->login_attempt_count + 1,
-            ]);
-            
-            return true;
-        }
-        
-        return false;
-    }
-
-    /**
-     * Check if login verification code is valid
-     */
-    public function hasValidLoginVerificationCode()
-    {
-        return $this->login_verification_code &&
-               $this->login_verification_code_expires_at &&
-               $this->login_verification_code_expires_at->isFuture();
-    }
-
-    /**
-     * Mark user as needing login verification after first login
-     */
-    public function markForLoginVerification()
-    {
-        if (!$this->is_first_login) {
-            $this->update([
-                'is_first_login' => false,
-                'last_login_at' => now(),
-                'login_attempt_count' => $this->login_attempt_count + 1,
-            ]);
-        }
-    }
-
-    /**
-     * Generate and store an email verification code
-     */
-    public function generateEmailVerificationCode()
-    {
-        // If there is an active code, reuse it (idempotent)
-        if ($this->hasValidEmailVerificationCode()) {
-            return $this->email_verification_code;
-        }
-
-        $code = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-        $this->update([
-            'email_verification_code' => $code,
-            // Extend validity to 1 month as requested
-            'email_verification_code_expires_at' => now()->addMonth(),
-        ]);
-        return $code;
-    }
-
-    /**
-     * Verify the email verification code
-     */
-    public function verifyEmailCode($code)
-    {
-        if (!$this->email_verification_code || 
-            !$this->email_verification_code_expires_at ||
-            $this->email_verification_code_expires_at->isPast()) {
-            return false;
-        }
-        
-        if ($this->email_verification_code === $code) {
-            // Clear the verification code and mark email as verified
-            $this->update([
-                'email_verification_code' => null,
-                'email_verification_code_expires_at' => null,
-            ]);
-            
-            // Use the contract method to mark as verified
-            $this->markEmailAsVerified();
-            
-            return true;
-        }
-        
-        return false;
-    }
-
-    /**
-     * Check if email verification code is valid
-     */
-    public function hasValidEmailVerificationCode()
-    {
-        return $this->email_verification_code &&
-               $this->email_verification_code_expires_at &&
-               $this->email_verification_code_expires_at->isFuture();
-    }
-
-    /**
-     * Override the default email verification notification to send 6-digit codes
-     */
-    public function sendEmailVerificationNotification()
-    {
-        // Generate or reuse existing valid code and send
-        $code = $this->generateEmailVerificationCode();
-        $this->notify(new EmailVerificationCodeNotification($code));
-    }
-
-    /**
-     * Send a custom email verification code (explicit method)
-     */
-    public function sendEmailVerificationCode()
-    {
-        $code = $this->generateEmailVerificationCode();
-        $this->notify(new EmailVerificationCodeNotification($code));
-    }
-
-    /**
-     * Determine if the user has verified their email address.
-     */
-    public function hasVerifiedEmail()
-    {
-        return ! is_null($this->email_verified_at);
-    }
-
-    /**
-     * Mark the given user's email as verified.
-     */
-    public function markEmailAsVerified()
-    {
-        return $this->forceFill([
-            'email_verified_at' => $this->freshTimestamp(),
-        ])->save();
-    }
-
-    /**
-     * Get the email address that should be used for verification.
-     */
-    public function getEmailForVerification()
-    {
-        return $this->email;
-    }
 }

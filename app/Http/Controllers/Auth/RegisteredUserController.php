@@ -7,14 +7,13 @@ use App\Models\SystemRole;
 use App\Models\User;
 use App\Models\SubscriptionPlan;
 use App\Models\FinancialAidSubscription;
-use App\Notifications\EmailVerificationCodeNotification;
 use Carbon\Carbon;
-use Illuminate\Auth\Events\Registered;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rules;
+use App\Notifications\EmailVerificationCodeNotification;
 
 class RegisteredUserController extends Controller
 {
@@ -87,11 +86,19 @@ class RegisteredUserController extends Controller
             // Swallow errors to avoid breaking registration; consider logging in production
         }
 
-        // Skip default Registered event to prevent Laravel's default email verification
-        // event(new Registered($user));
+        $roleName = strtolower(optional(SystemRole::find($user->systemrole_id))->name ?? '');
 
-        // Send custom email verification code
-        $user->sendEmailVerificationCode();
+        if ($roleName === 'director') {
+            // Issue 5-digit code and ask to verify before proceeding
+            $code = $user->issueEmailVerificationCode();
+            $user->notify(new EmailVerificationCodeNotification($code));
+            // Do not log in yet; client will navigate to verification screen
+            return response()->json([
+                'message' => 'Verification required. A 5-digit code was sent to your email.',
+                'requires_verification' => true,
+                'email' => $user->email,
+            ], 202);
+        }
 
         Auth::login($user);
 

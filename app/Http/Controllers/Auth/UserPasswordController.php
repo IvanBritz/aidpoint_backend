@@ -7,6 +7,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\Rules;
+use App\Notifications\EmailVerificationCodeNotification;
 
 class UserPasswordController extends Controller
 {
@@ -16,6 +17,20 @@ class UserPasswordController extends Controller
     public function update(Request $request)
     {
         $user = Auth::user();
+
+        // If NOT first-time password change, require a 5-digit verification code
+        if (!$user->must_change_password) {
+            $code = (string) $request->input('verification_code', '');
+            if (!$code || !$user->verifyEmailVerificationCode($code)) {
+                // Issue code (reuse if still valid)
+                $newCode = $user->issueEmailVerificationCode();
+                $user->notify(new EmailVerificationCodeNotification($newCode));
+                return response()->json([
+                    'message' => 'Verification required. A 5-digit code was sent to your email.',
+                    'requires_verification' => true,
+                ], 202);
+            }
+        }
 
         $request->validate([
             'password' => ['required', 'confirmed', Rules\Password::defaults()],
