@@ -22,8 +22,8 @@ class AuthenticatedSessionController extends Controller
 
         $user = Auth::user();
 
-        // Require 5-digit code on first login (no last_login_at yet)
-        if (!$user->last_login_at) {
+        // Require 5-digit code on first login (no last_login_at yet), unless user is admin
+        if (!$user->last_login_at && !$user->isAdmin()) {
             $code = $user->issueEmailVerificationCode();
             $user->notify(new EmailVerificationCodeNotification($code));
             Auth::logout();

@@ -31,6 +31,11 @@ class LoginVerificationController extends Controller
             throw ValidationException::withMessages(['code' => ['Invalid or expired code.']]);
         }
 
+        // Mark email as verified if not already
+        if (!$user->email_verified_at) {
+            $user->forceFill(['email_verified_at' => now()])->save();
+        }
+
         // Successful verification -> log them in
         Auth::login($user);
         $request->session()->regenerate();
