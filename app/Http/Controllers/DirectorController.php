@@ -62,7 +62,7 @@ class DirectorController extends Controller
             // Get beneficiary count (users marked as beneficiaries in this facility)
             $beneficiaryCount = User::where('financial_aid_id', $facility->id)
                 ->where(function ($q) {
-                    $q->where('systemrole_id', 4)
+                    $q->where('systemrole_id', 6)
                       ->orWhereHas('systemRole', function ($query) {
                           $query->where('name', 'beneficiary');
                       });
@@ -416,7 +416,7 @@ class DirectorController extends Controller
             // Count beneficiaries by financial_aid_id
             $beneficiaryCount = User::where('financial_aid_id', $facility->id)
                 ->where(function ($q) {
-                    $q->where('systemrole_id', 4)
+                    $q->where('systemrole_id', 6)
                       ->orWhereHas('systemRole', function ($query) {
                           $query->where('name', 'beneficiary');
                       });
@@ -539,7 +539,7 @@ class DirectorController extends Controller
             // Beneficiary statistics (users with beneficiary role in this facility)
             $totalBeneficiaries = User::where('financial_aid_id', $facility->id)
                 ->where(function ($q) {
-                    $q->where('systemrole_id', 4)
+                    $q->where('systemrole_id', 6)
                       ->orWhereHas('systemRole', function ($query) {
                           $query->where('name', 'beneficiary');
                       });
@@ -547,7 +547,7 @@ class DirectorController extends Controller
 
             $newBeneficiaries = User::where('financial_aid_id', $facility->id)
                 ->where(function ($q) {
-                    $q->where('systemrole_id', 4)
+                    $q->where('systemrole_id', 6)
                       ->orWhereHas('systemRole', function ($query) {
                           $query->where('name', 'beneficiary');
                       });

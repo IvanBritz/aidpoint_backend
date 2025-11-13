@@ -39,7 +39,11 @@ class UserPasswordController extends Controller
         $user->forceFill([
             'password' => Hash::make($request->string('password')),
             'must_change_password' => false,
+            'last_login_at' => now(), // Mark as logged in to prevent verification loop
         ])->save();
+
+        // Regenerate session to keep user logged in after password change
+        $request->session()->regenerate();
 
         return response()->json([
             'success' => true,
