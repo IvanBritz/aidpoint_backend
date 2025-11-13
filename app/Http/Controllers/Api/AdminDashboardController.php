@@ -44,7 +44,7 @@ class AdminDashboardController extends Controller
             
             // Get beneficiary count for this center
             $beneficiaryCount = User::where('financial_aid_id', $center->id)
-                ->where('systemrole_id', 4) // Assuming 4 is beneficiary role
+                ->where('systemrole_id', 6) // Beneficiary role ID is 6
                 ->count();
             
             // Get pending subscription requests for this center owner
