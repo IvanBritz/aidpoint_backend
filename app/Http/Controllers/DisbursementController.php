@@ -470,7 +470,10 @@ class DisbursementController extends Controller
         }
 
         $perPage = (int) $request->get('per_page', 10);
-        $query = Disbursement::with(['aidRequest.beneficiary'])
+        // Include beneficiary and their assigned caseworker so the frontend can show the caseworker name
+        $query = Disbursement::with([
+                'aidRequest.beneficiary.caseworker',
+            ])
             ->where('status', 'beneficiary_received')
             ->orderByDesc('beneficiary_received_at');
 
