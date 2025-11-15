@@ -14,18 +14,9 @@ class EnsureActiveSubscription
      */
     public function handle(Request $request, Closure $next): Response
     {
-        $user = $request->user();
-        if (!$user) {
-            return response()->json(['message' => 'Unauthorized'], 401);
-        }
-
-        // Allow admins regardless (admin portal maintenance etc.)
-        $role = strtolower(optional($user->systemRole)->name);
-        if ($role === 'admin') {
-            return $next($request);
-        }
-
-        // Allow-list of endpoints required to renew while suspended or to render lockout screens
+        // Allow-list of endpoints that must remain accessible even without auth
+        // (e.g. public plans page, PayMongo webhooks, etc.). This runs BEFORE
+        // we enforce authentication so guests can still hit these endpoints.
         $allowedPatterns = [
             // Public endpoints used before/without auth
             'api/public/*',
@@ -53,6 +44,17 @@ class EnsureActiveSubscription
             if ($request->is($p)) {
                 return $next($request);
             }
+        }
+
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
+        // Allow admins regardless (admin portal maintenance etc.)
+        $role = strtolower(optional($user->systemRole)->name);
+        if ($role === 'admin') {
+            return $next($request);
         }
 
         // If user is archived, block immediately
