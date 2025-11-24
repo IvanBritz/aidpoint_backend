@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\AidRequest;
 use App\Models\Disbursement;
 use App\Models\Notification;
+use App\Models\AuditLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -58,16 +59,61 @@ class DisbursementController extends Controller
 
         // Verify this aid request belongs to finance staff's facility
         if (!$aidRequest->beneficiary || $aidRequest->beneficiary->financial_aid_id !== $user->financial_aid_id) {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_unauthorized_attempt',
+                    'Unauthorized disbursement attempt by finance for another facility',
+                    [
+                        'aid_request_id' => $aidRequest->id,
+                        'attempted_by' => $user->id,
+                        'attempted_facility_id' => $user->financial_aid_id,
+                        'beneficiary_facility_id' => $aidRequest->beneficiary?->financial_aid_id,
+                    ],
+                    'disbursement',
+                    null,
+                    'critical',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'This request does not belong to your facility.'], 403);
         }
 
         // Verify aid request is approved and not already disbursed
         if ($aidRequest->status !== 'approved' || $aidRequest->stage !== 'done' || $aidRequest->director_decision !== 'approved') {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_invalid_status_attempt',
+                    'Attempted disbursement before required approvals',
+                    [
+                        'aid_request_id' => $aidRequest->id,
+                        'status' => $aidRequest->status,
+                        'stage' => $aidRequest->stage,
+                        'director_decision' => $aidRequest->director_decision,
+                    ],
+                    'disbursement',
+                    null,
+                    'high',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'This request is not ready for disbursement.'], 422);
         }
 
         // Check if already disbursed
         if ($aidRequest->disbursements()->exists()) {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_duplicate_attempt',
+                    'Duplicate disbursement attempt detected',
+                    [
+                        'aid_request_id' => $aidRequest->id,
+                    ],
+                    'disbursement',
+                    null,
+                    'critical',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'This request has already been disbursed.'], 422);
         }
 
@@ -90,6 +136,22 @@ class DisbursementController extends Controller
         }
         
         if (($typeTotal + $generalTotal) < $amount) {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_insufficient_funds',
+                    'Insufficient funds detected during disbursement attempt',
+                    [
+                        'aid_request_id' => $aidRequest->id,
+                        'requested_amount' => $amount,
+                        'available_type_total' => $typeTotal,
+                        'available_general_total' => $generalTotal,
+                    ],
+                    'disbursement',
+                    null,
+                    'high',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'Insufficient funds in your facility\'s allocations to disburse this amount.'], 422);
         }
 
@@ -115,6 +177,20 @@ class DisbursementController extends Controller
             Notification::notifyDisbursementCreated([$caseworkerId], $payload, 'high');
         }
 
+        try {
+            AuditLog::logDisbursementCreated($disbursement->id, [
+                'disbursement_id' => $disbursement->id,
+                'aid_request_id' => $aidRequest->id,
+                'beneficiary_id' => $aidRequest->beneficiary_id,
+                'beneficiary_name' => trim(($aidRequest->beneficiary->firstname ?? '') . ' ' . ($aidRequest->beneficiary->lastname ?? '')),
+                'amount' => (float) $amount,
+                'fund_type' => $aidRequest->fund_type,
+                'notes' => $request->notes,
+                'finance_disbursed_by' => $user->id,
+                'finance_disbursed_at' => now()->toDateTimeString(),
+            ]);
+        } catch (\Throwable $e) { }
+
         return response()->json([
             'success' => true, 
             'data' => $disbursement, 
@@ -137,11 +213,40 @@ class DisbursementController extends Controller
         // Verify this disbursement is for caseworker's assigned beneficiary
         if (!$disbursement->aidRequest->beneficiary || 
             $disbursement->aidRequest->beneficiary->caseworker_id !== $user->id) {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_unauthorized_caseworker_attempt',
+                    'Unauthorized caseworker receipt attempt',
+                    [
+                        'disbursement_id' => $disbursement->id,
+                        'aid_request_id' => $disbursement->aid_request_id,
+                        'attempted_by' => $user->id,
+                    ],
+                    'disbursement',
+                    $disbursement->id,
+                    'critical',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'You are not assigned to this beneficiary.'], 403);
         }
 
         // Verify disbursement is in correct status
         if ($disbursement->status !== 'finance_disbursed') {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_invalid_status_attempt',
+                    'Caseworker attempted receipt with invalid status',
+                    [
+                        'disbursement_id' => $disbursement->id,
+                        'current_status' => $disbursement->status,
+                    ],
+                    'disbursement',
+                    $disbursement->id,
+                    'high',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'This disbursement is not ready for caseworker receipt.'], 422);
         }
 
@@ -151,6 +256,26 @@ class DisbursementController extends Controller
             'caseworker_received_by' => $user->id,
             'caseworker_received_at' => now(),
         ]);
+
+        try {
+            AuditLog::logEvent(
+                'disbursement_caseworker_received',
+                'Caseworker acknowledged receipt of cash disbursement',
+                [
+                    'disbursement_id' => $disbursement->id,
+                    'aid_request_id' => $disbursement->aid_request_id,
+                    'beneficiary_id' => $disbursement->aidRequest->beneficiary_id,
+                    'beneficiary_name' => trim(($disbursement->aidRequest->beneficiary->firstname ?? '') . ' ' . ($disbursement->aidRequest->beneficiary->lastname ?? '')),
+                    'amount' => (float) $disbursement->amount,
+                    'caseworker_received_by' => $user->id,
+                    'caseworker_received_at' => now()->toDateTimeString(),
+                ],
+                'disbursement',
+                $disbursement->id,
+                'medium',
+                'financial'
+            );
+        } catch (\Throwable $e) { }
 
         return response()->json([
             'success' => true, 
@@ -174,11 +299,40 @@ class DisbursementController extends Controller
         // Verify this disbursement is for caseworker's assigned beneficiary
         if (!$disbursement->aidRequest->beneficiary || 
             $disbursement->aidRequest->beneficiary->caseworker_id !== $user->id) {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_unauthorized_caseworker_attempt',
+                    'Unauthorized caseworker disbursement attempt',
+                    [
+                        'disbursement_id' => $disbursement->id,
+                        'aid_request_id' => $disbursement->aid_request_id,
+                        'attempted_by' => $user->id,
+                    ],
+                    'disbursement',
+                    $disbursement->id,
+                    'critical',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'You are not assigned to this beneficiary.'], 403);
         }
 
         // Verify disbursement is in correct status (can disburse after receiving or if already received)
         if (!in_array($disbursement->status, ['finance_disbursed', 'caseworker_received'])) {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_invalid_status_attempt',
+                    'Caseworker attempted beneficiary disbursement with invalid status',
+                    [
+                        'disbursement_id' => $disbursement->id,
+                        'current_status' => $disbursement->status,
+                    ],
+                    'disbursement',
+                    $disbursement->id,
+                    'high',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'This disbursement is not ready for beneficiary disbursement.'], 422);
         }
 
@@ -196,6 +350,26 @@ class DisbursementController extends Controller
         }
 
         $disbursement->update($updateData);
+
+        try {
+            AuditLog::logEvent(
+                'disbursement_caseworker_disbursed',
+                'Caseworker disbursed cash to beneficiary',
+                [
+                    'disbursement_id' => $disbursement->id,
+                    'aid_request_id' => $disbursement->aid_request_id,
+                    'beneficiary_id' => $disbursement->aidRequest->beneficiary_id,
+                    'beneficiary_name' => trim(($disbursement->aidRequest->beneficiary->firstname ?? '') . ' ' . ($disbursement->aidRequest->beneficiary->lastname ?? '')),
+                    'amount' => (float) $disbursement->amount,
+                    'caseworker_disbursed_by' => $user->id,
+                    'caseworker_disbursed_at' => now()->toDateTimeString(),
+                ],
+                'disbursement',
+                $disbursement->id,
+                'medium',
+                'financial'
+            );
+        } catch (\Throwable $e) { }
 
         // Notify the beneficiary
         Notification::create([
@@ -229,11 +403,40 @@ class DisbursementController extends Controller
 
         // Verify this disbursement is for this beneficiary
         if ($disbursement->aidRequest->beneficiary_id !== $user->id) {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_unauthorized_beneficiary_attempt',
+                    'Unauthorized beneficiary receipt attempt',
+                    [
+                        'disbursement_id' => $disbursement->id,
+                        'aid_request_id' => $disbursement->aid_request_id,
+                        'attempted_by' => $user->id,
+                    ],
+                    'disbursement',
+                    $disbursement->id,
+                    'critical',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'This disbursement does not belong to you.'], 403);
         }
 
         // Verify disbursement is in correct status
         if ($disbursement->status !== 'caseworker_disbursed') {
+            try {
+                AuditLog::logEvent(
+                    'disbursement_invalid_status_attempt',
+                    'Beneficiary attempted receipt with invalid status',
+                    [
+                        'disbursement_id' => $disbursement->id,
+                        'current_status' => $disbursement->status,
+                    ],
+                    'disbursement',
+                    $disbursement->id,
+                    'high',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'This disbursement is not ready for beneficiary receipt.'], 422);
         }
 
@@ -302,6 +505,25 @@ class DisbursementController extends Controller
                 'fully_liquidated' => false,
             ]);
         });
+
+        try {
+            AuditLog::logEvent(
+                'disbursement_beneficiary_received',
+                'Beneficiary confirmed receipt of cash disbursement',
+                [
+                    'disbursement_id' => $disbursement->id,
+                    'aid_request_id' => $disbursement->aid_request_id,
+                    'beneficiary_id' => $disbursement->aidRequest->beneficiary_id,
+                    'beneficiary_name' => trim(($disbursement->aidRequest->beneficiary->firstname ?? '') . ' ' . ($disbursement->aidRequest->beneficiary->lastname ?? '')),
+                    'amount' => (float) $disbursement->amount,
+                    'beneficiary_received_at' => now()->toDateTimeString(),
+                ],
+                'disbursement',
+                $disbursement->id,
+                'high',
+                'financial'
+            );
+        } catch (\Throwable $e) { }
 
         // Notify finance that the disbursement is complete (real-time)
         Notification::createForUser(

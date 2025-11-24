@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\BeneficiaryAttendance;
+use App\Models\AuditLog;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -57,6 +58,21 @@ class AttendanceController extends Controller
                           ->first();
 
         if (!$beneficiary) {
+            try {
+                AuditLog::logEvent(
+                    'attendance_caseworker_unauthorized_attempt',
+                    'Unauthorized caseworker attendance record attempt',
+                    [
+                        'beneficiary_id' => (int) $request->beneficiary_id,
+                        'attendance_date' => (string) $request->attendance_date,
+                        'attempted_by' => $user->id,
+                    ],
+                    'attendance',
+                    null,
+                    'critical',
+                    'user_management'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'Beneficiary not found or not assigned to you.'], 404);
         }
 
@@ -139,6 +155,22 @@ class AttendanceController extends Controller
                 $user->id,
                 $request->notes
             );
+            try {
+                AuditLog::logEvent(
+                    'attendance_recorded',
+                    'Caseworker recorded beneficiary attendance',
+                    [
+                        'attendance_id' => $attendance->id,
+                        'beneficiary_id' => (int) $request->beneficiary_id,
+                        'attendance_date' => (string) $request->attendance_date,
+                        'status' => (string) $request->status,
+                    ],
+                    'attendance',
+                    $attendance->id,
+                    'low',
+                    'user_management'
+                );
+            } catch (\Throwable $e) { }
             
             // Automatically recalculate COLA amounts for this beneficiary's pending requests
             \App\Models\AidRequest::recalculateColaAmounts(

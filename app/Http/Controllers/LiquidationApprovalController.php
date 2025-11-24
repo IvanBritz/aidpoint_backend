@@ -19,7 +19,7 @@ class LiquidationApprovalController extends Controller
     public function getPendingApprovals(Request $request)
     {
         $user = Auth::user()->load('systemRole');
-        $query = Liquidation::with(['beneficiary', 'disbursement', 'receipts']);
+        $query = Liquidation::with(['beneficiary', 'disbursement', 'receipts', 'caseworkerApprover', 'financeApprover', 'directorApprover']);
 
         // Get user role from systemRole relationship
         $userRole = $user->systemRole ? strtolower($user->systemRole->name) : null;
@@ -46,10 +46,18 @@ class LiquidationApprovalController extends Controller
         }
 
         $liquidations = $query->orderBy('created_at', 'asc')->get();
-        
+
+        // Compose approver full names for each liquidation so frontend can display them directly
+        $payload = $liquidations->map(function ($l) {
+            $arr = $l->toArray();
+            $arr['caseworker_name'] = $l->caseworkerApprover ? $l->caseworkerApprover->full_name : null;
+            $arr['finance_name'] = $l->financeApprover ? $l->financeApprover->full_name : null;
+            return $arr;
+        });
+
         return response()->json([
-            'data' => $liquidations,
-            'count' => $liquidations->count()
+            'data' => $payload,
+            'count' => $payload->count()
         ]);
     }
 
@@ -312,6 +320,25 @@ class LiquidationApprovalController extends Controller
 
         $liquidation->rejectAtFinanceLevel($user->id, $request->reason);
         
+        try {
+            $liquidation->load('beneficiary');
+            $payload = [
+                'amount' => (float) ($liquidation->total_disbursed_amount ?? 0),
+                'beneficiary_name' => trim(($liquidation->beneficiary->firstname ?? '') . ' ' . ($liquidation->beneficiary->lastname ?? '')),
+                'approver_name' => trim(($user->firstname ?? '') . ' ' . ($user->lastname ?? '')),
+                'reason' => $request->reason,
+            ];
+            AuditLog::logEvent(
+                'liquidation_finance_rejected',
+                'Liquidation rejected by Finance for ' . $payload['beneficiary_name'],
+                $payload,
+                'liquidation',
+                $liquidation->id,
+                'high',
+                'financial'
+            );
+        } catch (\Throwable $e) { }
+        
         return response()->json([
             'message' => 'Liquidation rejected by finance team',
             'liquidation' => $liquidation->fresh()
@@ -340,6 +367,26 @@ class LiquidationApprovalController extends Controller
         }
 
         $liquidation->approveByDirector($user->id, $request->notes);
+
+        try {
+            $liquidation->load('beneficiary');
+            $payload = [
+                'amount' => (float) ($liquidation->total_disbursed_amount ?? 0),
+                'beneficiary_name' => trim(($liquidation->beneficiary->firstname ?? '') . ' ' . ($liquidation->beneficiary->lastname ?? '')),
+                'approver_name' => trim(($user->firstname ?? '') . ' ' . ($user->lastname ?? '')),
+                'notes' => $request->notes,
+                'director_approved_at' => now()->toDateTimeString(),
+            ];
+            AuditLog::logEvent(
+                'liquidation_director_approved',
+                'Liquidation approved by Director for ' . $payload['beneficiary_name'],
+                $payload,
+                'liquidation',
+                $liquidation->id,
+                'high',
+                'financial'
+            );
+        } catch (\Throwable $e) { }
 
         // Notify caseworker that this liquidation is fully completed and is now in their completed list
         try {
@@ -415,6 +462,26 @@ class LiquidationApprovalController extends Controller
         }
 
         $liquidation->rejectAtDirectorLevel($user->id, $request->reason);
+        
+        try {
+            $liquidation->load('beneficiary');
+            $payload = [
+                'amount' => (float) ($liquidation->total_disbursed_amount ?? 0),
+                'beneficiary_name' => trim(($liquidation->beneficiary->firstname ?? '') . ' ' . ($liquidation->beneficiary->lastname ?? '')),
+                'approver_name' => trim(($user->firstname ?? '') . ' ' . ($user->lastname ?? '')),
+                'reason' => $request->reason,
+                'director_rejected_at' => now()->toDateTimeString(),
+            ];
+            AuditLog::logEvent(
+                'liquidation_director_rejected',
+                'Liquidation rejected by Director for ' . $payload['beneficiary_name'],
+                $payload,
+                'liquidation',
+                $liquidation->id,
+                'high',
+                'financial'
+            );
+        } catch (\Throwable $e) { }
         
         return response()->json([
             'message' => 'Liquidation rejected by project director',

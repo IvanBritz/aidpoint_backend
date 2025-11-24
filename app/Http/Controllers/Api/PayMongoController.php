@@ -509,37 +509,44 @@ class PayMongoController extends Controller
                 }
             }
 
-            // Expire existing active subscriptions
-            $expiredCount = FinancialAidSubscription::where('user_id', $userId)
+            // Extend existing active subscription and switch to new plan
+            $current = FinancialAidSubscription::where('user_id', $userId)
                 ->where('status', 'Active')
                 ->where('end_date', '>=', now()->toDateString())
-                ->update(['status' => 'Expired']);
-
-            // Activate new (or update pending) subscription
-            $start = now()->toDateString();
-            $end = Carbon::now()->addMonths($plan->duration_in_months)->addDays($plan->duration_in_days)->addSeconds($plan->duration_in_seconds)->toDateString();
-
-            // First check for existing pending subscription for this plan
-            $sub = FinancialAidSubscription::where('user_id', $userId)
-                ->where('plan_id', $plan->plan_id)
-                ->where('status', 'Pending')
-                ->orderByDesc('created_at')
+                ->orderByDesc('end_date')
                 ->first();
 
-            if ($sub) {
-                // Update existing pending subscription
-                $sub->update([
-                    'start_date' => $start,
-                    'end_date' => $end,
+            $baseEnd = $current && $current->end_date ? Carbon::parse($current->end_date) : Carbon::now();
+            $newEnd = (clone $baseEnd)
+                ->addMonths((int)($plan->duration_in_months ?? 0))
+                ->addDays((int)($plan->duration_in_days ?? 0))
+                ->addSeconds((int)($plan->duration_in_seconds ?? 0))
+                ->toDateString();
+
+            if ($current) {
+                $oldPlanId = $current->plan_id;
+                $current->update([
+                    'plan_id' => $plan->plan_id,
+                    // keep original start_date; only extend the end_date
+                    'end_date' => $newEnd,
                     'status' => 'Active',
                 ]);
-                Log::info('Updated pending subscription to active', [
+                $sub = $current;
+                Log::info('Extended active subscription and switched plan', [
                     'subscription_id' => $sub->subscription_id,
                     'user_id' => $userId,
-                    'plan_id' => $plan->plan_id
+                    'old_plan_id' => $oldPlanId,
+                    'new_plan_id' => $plan->plan_id,
+                    'new_end_date' => $newEnd,
                 ]);
             } else {
-                // Create new active subscription (common for PayMongo checkout flow)
+                // No active subscription; create new starting now
+                $start = now()->toDateString();
+                $end = Carbon::now()
+                    ->addMonths((int)($plan->duration_in_months ?? 0))
+                    ->addDays((int)($plan->duration_in_days ?? 0))
+                    ->addSeconds((int)($plan->duration_in_seconds ?? 0))
+                    ->toDateString();
                 $sub = FinancialAidSubscription::create([
                     'user_id' => $userId,
                     'plan_id' => $plan->plan_id,
@@ -551,14 +558,14 @@ class PayMongoController extends Controller
                     'subscription_id' => $sub->subscription_id,
                     'user_id' => $userId,
                     'plan_id' => $plan->plan_id,
-                    'expired_previous' => $expiredCount
+                    'new_end_date' => $end,
                 ]);
             }
 
             // Record the transaction as paid (single source of truth)
             $transaction = SubscriptionTransaction::create([
                 'user_id' => $userId,
-                'old_plan_id' => null,
+                'old_plan_id' => isset($oldPlanId) ? $oldPlanId : null,
                 'new_plan_id' => $plan->plan_id,
                 'payment_method' => $paymentMethod,
                 'amount_paid' => $plan->price,
@@ -566,8 +573,8 @@ class PayMongoController extends Controller
                 'notes' => 'PayMongo payment ' . (string) $txnId,
                 'payment_intent_id' => $intentId,
                 'status' => 'paid',
-                'start_date' => $start,
-                'end_date' => $end,
+                'start_date' => $sub->start_date,
+                'end_date' => $sub->end_date,
             ]);
 
             DB::commit();

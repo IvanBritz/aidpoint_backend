@@ -7,6 +7,7 @@ use App\Models\LiquidationReceipt;
 use App\Models\Disbursement;
 use App\Models\User;
 use App\Models\Notification;
+use App\Models\AuditLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
@@ -121,10 +122,10 @@ class LiquidationController extends Controller
                 }
                 $file = $receipt['file'];
                 $ext = strtolower($file->getClientOriginalExtension() ?? '');
-                if (!in_array($ext, ['jpg', 'jpeg', 'png', 'pdf'], true)) {
+                if (!in_array($ext, ['pdf'], true)) {
                     return response()->json([
                         'success' => false,
-                        'message' => 'Receipt files must be JPG, JPEG, PNG, or PDF.'
+                        'message' => 'Receipt files must be PDF documents (.pdf) only.'
                     ], 422);
                 }
                 // size (<= 5 MB)
@@ -169,7 +170,7 @@ class LiquidationController extends Controller
                 'receipts' => ['required', 'array', 'min:1', 'max:10'],
                 'receipts.*.file' => [
                     'required',
-                    File::types(['jpg', 'jpeg', 'png', 'pdf'])
+                    File::types(['pdf'])
                         ->max('5mb'),
                 ],
                 'receipts.*.amount' => ['required', 'numeric', 'min:0.01'],
@@ -379,6 +380,21 @@ class LiquidationController extends Controller
 
         // Ensure this caseworker is assigned to the beneficiary
         if (!$liquidation->beneficiary || $liquidation->beneficiary->caseworker_id !== $user->id) {
+            try {
+                AuditLog::logEvent(
+                    'liquidation_caseworker_unauthorized_attempt',
+                    'Unauthorized caseworker liquidation review attempt',
+                    [
+                        'liquidation_id' => $liquidation->id,
+                        'attempted_by' => $user->id,
+                        'beneficiary_id' => $liquidation->beneficiary?->id,
+                    ],
+                    'liquidation',
+                    $liquidation->id,
+                    'critical',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json([
                 'success' => false,
                 'message' => 'You are not authorized to review this liquidation.'
@@ -386,6 +402,20 @@ class LiquidationController extends Controller
         }
 
         if ($liquidation->status !== 'pending') {
+            try {
+                AuditLog::logEvent(
+                    'liquidation_invalid_status_attempt',
+                    'Caseworker attempted liquidation review with invalid status',
+                    [
+                        'liquidation_id' => $liquidation->id,
+                        'current_status' => $liquidation->status,
+                    ],
+                    'liquidation',
+                    $liquidation->id,
+                    'high',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json([
                 'success' => false,
                 'message' => 'Only pending liquidations can be reviewed.'
@@ -431,6 +461,27 @@ class LiquidationController extends Controller
                 'liquidation_id' => $liquidation->id,
             ]);
         }
+
+        try {
+            $eventType = $status === 'approved' ? 'liquidation_caseworker_approved' : 'liquidation_caseworker_rejected';
+            $desc = $status === 'approved'
+                ? ('Caseworker approved liquidation for ' . trim(($liquidation->beneficiary->firstname ?? '') . ' ' . ($liquidation->beneficiary->lastname ?? '')))
+                : ('Caseworker rejected liquidation for ' . trim(($liquidation->beneficiary->firstname ?? '') . ' ' . ($liquidation->beneficiary->lastname ?? '')));
+            AuditLog::logEvent(
+                $eventType,
+                $desc,
+                [
+                    'liquidation_id' => $liquidation->id,
+                    'beneficiary_id' => $liquidation->beneficiary_id,
+                    'beneficiary_name' => trim(($liquidation->beneficiary->firstname ?? '') . ' ' . ($liquidation->beneficiary->lastname ?? '')),
+                    'notes' => $request->reviewer_notes,
+                ],
+                'liquidation',
+                $liquidation->id,
+                $status === 'approved' ? 'medium' : 'medium',
+                'financial'
+            );
+        } catch (\Throwable $e) { }
 
         $liquidation->load('reviewer');
 

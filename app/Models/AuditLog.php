@@ -323,4 +323,18 @@ class AuditLog extends Model
             'user_management'
         );
     }
+
+    protected static function booted(): void
+    {
+        static::created(function (AuditLog $log) {
+            $user = Auth::user();
+            $facilityId = (int) ($user?->financial_aid_id ?? $user?->financialAid?->id ?? 0);
+            if ($facilityId > 0) {
+                try {
+                    event(new \App\Events\AuditLogRecorded($log, $facilityId));
+                } catch (\Throwable $e) {
+                }
+            }
+        });
+    }
 }

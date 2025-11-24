@@ -119,6 +119,7 @@ class EmployeeController extends Controller
         }
 
         $employee = User::where('financial_aid_id', $facility->id)->findOrFail($id);
+        $originalStatus = $employee->status;
 
         $request->validate([
             'firstname' => ['sometimes', 'string', 'max:255'],
@@ -139,6 +140,11 @@ class EmployeeController extends Controller
         $employee->fill($request->only(['firstname','middlename','lastname','contact_number','address','email','status']));
         $employee->save();
 
+        // If a caseworker is being archived (status active -> inactive), unassign all their beneficiaries
+        if ($originalStatus === 'active' && $employee->status === 'inactive') {
+            $this->unassignBeneficiariesForCaseworker($employee);
+        }
+
         return response()->json([
             'success' => true,
             'data' => $employee->load('systemRole'),
@@ -158,9 +164,30 @@ class EmployeeController extends Controller
         }
 
         $employee = User::where('financial_aid_id', $facility->id)->findOrFail($id);
-        $employee->delete();
 
-        return response()->json(['success' => true, 'message' => 'Employee deleted successfully.']);
+        // Archive employee by marking status as inactive instead of deleting any related data
+        $employee->status = 'inactive';
+        $employee->save();
+
+        // Also unassign beneficiaries if this employee is a caseworker
+        $this->unassignBeneficiariesForCaseworker($employee);
+
+        return response()->json(['success' => true, 'message' => 'Employee archived successfully.']);
+    }
+
+    /**
+     * When a caseworker is archived, unassign all beneficiaries linked to them.
+     */
+    protected function unassignBeneficiariesForCaseworker(User $employee): void
+    {
+        // Only apply to caseworker role
+        $caseworkerRoleId = SystemRole::where('name', 'caseworker')->value('id');
+        if ((int) $employee->systemrole_id !== (int) $caseworkerRoleId) {
+            return;
+        }
+
+        // Set caseworker_id to null for all beneficiaries assigned to this caseworker
+        User::where('caseworker_id', $employee->id)->update(['caseworker_id' => null]);
     }
 
     /**

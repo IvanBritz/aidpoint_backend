@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\BeneficiaryDocumentSubmission;
+use App\Models\AuditLog;
 use App\Models\User;
 use App\Models\Notification;
 use Illuminate\Http\Request;
@@ -53,9 +54,9 @@ class BeneficiaryDocumentSubmissionController extends Controller
             'year_level' => ['required', 'string', 'max:50'],
             'is_scholar' => ['required', 'boolean'],
             // Images only for Enrollment Certification, Scholarship Certification, and SOA
-            'enrollment_certification' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png', 'max:4096'],
-            'scholarship_certification' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png', 'max:4096'],
-            'sao_photo' => ['nullable', 'file', 'image', 'mimes:jpg,jpeg,png', 'max:4096'],
+'enrollment_certification' => ['nullable', 'file', 'mimes:jpg,jpeg,png,pdf', 'max:4096'],
+            'scholarship_certification' => ['nullable', 'file', 'mimes:jpg,jpeg,png,pdf', 'max:4096'],
+            'sao_photo' => ['nullable', 'file', 'mimes:jpg,jpeg,png,pdf', 'max:4096'],
         ]);
 
         // Find pending submission for update, otherwise create new
@@ -170,6 +171,34 @@ class BeneficiaryDocumentSubmissionController extends Controller
     }
 
     /**
+     * List approved submissions for the authenticated caseworker
+     */
+    public function approvedByCaseworker(Request $request)
+    {
+        $user = Auth::user();
+        if (!$user || !$user->systemRole || strtolower($user->systemRole->name) !== 'caseworker') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Only caseworkers can view approved submissions.'
+            ], 403);
+        }
+
+        $perPage = $request->get('per_page', 10);
+
+        $query = BeneficiaryDocumentSubmission::with(['beneficiary', 'reviewer'])
+            ->where('status', 'approved')
+            ->where('reviewed_by', $user->id)
+            ->orderByDesc('reviewed_at');
+
+        $page = $query->paginate($perPage);
+
+        return response()->json([
+            'success' => true,
+            'data' => $page,
+        ]);
+    }
+
+    /**
      * Review a submission (approve or reject) by caseworker
      */
     public function review(Request $request, $id)
@@ -191,6 +220,21 @@ class BeneficiaryDocumentSubmissionController extends Controller
 
         // Ensure this caseworker is assigned to the beneficiary
         if (!$submission->beneficiary || $submission->beneficiary->caseworker_id !== $user->id) {
+            try {
+                AuditLog::logEvent(
+                    'enrollment_caseworker_unauthorized_attempt',
+                    'Unauthorized caseworker enrollment review attempt',
+                    [
+                        'submission_id' => $submission->id,
+                        'attempted_by' => $user->id,
+                        'beneficiary_id' => $submission->beneficiary?->id,
+                    ],
+                    'enrollment',
+                    $submission->id,
+                    'critical',
+                    'user_management'
+                );
+            } catch (\Throwable $e) { }
             return response()->json([
                 'success' => false,
                 'message' => 'You are not authorized to review this submission.'
@@ -198,6 +242,20 @@ class BeneficiaryDocumentSubmissionController extends Controller
         }
 
         if ($submission->status !== 'pending') {
+            try {
+                AuditLog::logEvent(
+                    'enrollment_invalid_status_attempt',
+                    'Caseworker attempted enrollment review with invalid status',
+                    [
+                        'submission_id' => $submission->id,
+                        'current_status' => $submission->status,
+                    ],
+                    'enrollment',
+                    $submission->id,
+                    'high',
+                    'user_management'
+                );
+            } catch (\Throwable $e) { }
             return response()->json([
                 'success' => false,
                 'message' => 'Only pending submissions can be reviewed.'
@@ -210,15 +268,25 @@ class BeneficiaryDocumentSubmissionController extends Controller
         $submission->reviewed_at = now();
         $submission->save();
 
-        // If approved, sync beneficiary's scholar status to this submission's value for downstream calculations
+        // If approved, sync beneficiary fields from this submission
         if ($submission->status === 'approved' && $submission->beneficiary) {
             try {
+                $changed = false;
                 if ((bool)$submission->beneficiary->is_scholar !== (bool)$submission->is_scholar) {
                     $submission->beneficiary->is_scholar = (bool)$submission->is_scholar;
+                    $changed = true;
+                }
+                // Update displayed school year from approved year level
+                $newSchoolYear = (string) ($submission->year_level ?? '');
+                if ($newSchoolYear !== '' && $submission->beneficiary->school_year !== $newSchoolYear) {
+                    $submission->beneficiary->school_year = $newSchoolYear;
+                    $changed = true;
+                }
+                if ($changed) {
                     $submission->beneficiary->save();
                 }
             } catch (\Throwable $e) {
-                \Log::warning('Failed to sync beneficiary is_scholar from submission', [
+                \Log::warning('Failed to sync beneficiary fields from submission', [
                     'beneficiary_id' => $submission->beneficiary_id,
                     'error' => $e->getMessage(),
                 ]);
@@ -233,6 +301,17 @@ class BeneficiaryDocumentSubmissionController extends Controller
             $user->firstname . ' ' . $user->lastname,
             $request->review_notes
         );
+
+        try {
+            $reviewData = [
+                'status' => $request->status === 'approved' ? 'approved' : 'rejected',
+                'type' => 'enrollment',
+                'beneficiary_name' => trim(($submission->beneficiary->firstname ?? '') . ' ' . ($submission->beneficiary->lastname ?? '')),
+                'item_id' => $submission->id,
+                'review_notes' => $request->review_notes,
+            ];
+            AuditLog::logCaseworkerReview($reviewData);
+        } catch (\Throwable $e) { }
 
         return response()->json([
             'success' => true,

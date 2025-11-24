@@ -332,36 +332,51 @@ class UserSubscriptionController extends Controller
         try {
             DB::beginTransaction();
 
-            // Expire existing active subscriptions
-            FinancialAidSubscription::where('user_id', $user->id)
+            // Extend existing active subscription and switch to new plan
+            $current = FinancialAidSubscription::where('user_id', $user->id)
                 ->where('status', 'Active')
                 ->where('end_date', '>=', now()->toDateString())
-                ->update(['status' => 'Expired']);
+                ->orderByDesc('end_date')
+                ->first();
 
-            // Create new active subscription
-            $start = now()->toDateString();
-            $end = Carbon::now()->addMonths((int)($plan->duration_in_months ?? 0))->addDays((int)($plan->duration_in_days ?? 0))->addSeconds((int)($plan->duration_in_seconds ?? 0))->toDateString();
-            
-            $subscription = FinancialAidSubscription::create([
-                'user_id' => $user->id,
-                'plan_id' => $plan->plan_id,
-                'start_date' => $start,
-                'end_date' => $end,
-                'status' => 'Active',
-            ]);
+            $baseEnd = $current && $current->end_date ? Carbon::parse($current->end_date) : Carbon::now();
+            $newEnd = (clone $baseEnd)
+                ->addMonths((int)($plan->duration_in_months ?? 0))
+                ->addDays((int)($plan->duration_in_days ?? 0))
+                ->addSeconds((int)($plan->duration_in_seconds ?? 0))
+                ->toDateString();
+
+            if ($current) {
+                $oldPlanId = $current->plan_id;
+                $current->update([
+                    'plan_id' => $plan->plan_id,
+                    'end_date' => $newEnd,
+                    'status' => 'Active',
+                ]);
+                $subscription = $current;
+            } else {
+                $start = now()->toDateString();
+                $subscription = FinancialAidSubscription::create([
+                    'user_id' => $user->id,
+                    'plan_id' => $plan->plan_id,
+                    'start_date' => $start,
+                    'end_date' => $newEnd,
+                    'status' => 'Active',
+                ]);
+            }
 
             // Record transaction
             $transaction = SubscriptionTransaction::create([
                 'user_id' => $user->id,
-                'old_plan_id' => null,
+                'old_plan_id' => isset($oldPlanId) ? $oldPlanId : null,
                 'new_plan_id' => $plan->plan_id,
                 'payment_method' => $request->string('payment_method', 'MANUAL_ACTIVATION'),
                 'amount_paid' => $request->get('amount_paid'),
                 'transaction_date' => now(),
                 'notes' => 'Manual activation: ' . ($request->string('notes') ?: 'Payment confirmed but auto-activation failed'),
                 'status' => 'paid',
-                'start_date' => $start,
-                'end_date' => $end,
+                'start_date' => $subscription->start_date,
+                'end_date' => $subscription->end_date,
             ]);
 
             DB::commit();

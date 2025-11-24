@@ -7,6 +7,7 @@ use App\Models\BeneficiaryDocumentSubmission;
 use App\Models\BeneficiaryAttendance;
 use App\Models\Notification;
 use App\Models\User;
+use App\Models\AuditLog;
 use App\Services\DirectorNotificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -189,6 +190,19 @@ class AidRequestController extends Controller
             $responseData['cola_calculation'] = $colaCalculation;
         }
 
+        try {
+            AuditLog::logAidRequestSubmission($user->id, [
+                'request_id' => $aid->id,
+                'beneficiary_id' => $user->id,
+                'beneficiary_name' => trim(($user->firstname ?? '') . ' ' . ($user->lastname ?? '')),
+                'fund_type' => $aid->fund_type,
+                'amount' => (float) $aid->amount,
+                'month' => $requestMonth,
+                'year' => $requestYear,
+            ]);
+        } catch (\Throwable $e) {
+        }
+
         return response()->json([
             'success' => true,
             'data' => $responseData,
@@ -249,9 +263,39 @@ class AidRequestController extends Controller
         ]);
         $aid = AidRequest::with('beneficiary')->findOrFail($id);
         if (!$aid->beneficiary || $aid->beneficiary->caseworker_id !== $user->id) {
+            try {
+                AuditLog::logEvent(
+                    'aid_request_caseworker_unauthorized_attempt',
+                    'Unauthorized caseworker review attempt',
+                    [
+                        'aid_request_id' => $aid->id,
+                        'attempted_by' => $user->id,
+                        'beneficiary_id' => $aid->beneficiary?->id,
+                    ],
+                    'aid_request',
+                    $aid->id,
+                    'critical',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'You are not assigned to this beneficiary.'], 403);
         }
         if (!in_array($aid->stage, ['caseworker']) || $aid->status !== 'pending') {
+            try {
+                AuditLog::logEvent(
+                    'aid_request_invalid_stage_attempt',
+                    'Caseworker attempted review with invalid stage/status',
+                    [
+                        'aid_request_id' => $aid->id,
+                        'current_stage' => $aid->stage,
+                        'current_status' => $aid->status,
+                    ],
+                    'aid_request',
+                    $aid->id,
+                    'high',
+                    'financial'
+                );
+            } catch (\Throwable $e) { }
             return response()->json(['success' => false, 'message' => 'This request is not in the caseworker review stage.'], 422);
         }
 
@@ -290,6 +334,20 @@ $aid->stage = 'finance';
 
         $aid->save();
 
+        try {
+            $reviewData = [
+                'status' => $request->status,
+                'type' => 'aid_request',
+                'beneficiary_name' => trim(($aid->beneficiary->firstname ?? '') . ' ' . ($aid->beneficiary->lastname ?? '')),
+                'item_id' => $aid->id,
+                'fund_type' => $aid->fund_type,
+                'amount' => (float) $aid->amount,
+                'review_notes' => $request->review_notes,
+            ];
+            AuditLog::logCaseworkerReview($reviewData);
+        } catch (\Throwable $e) {
+        }
+
         // Notify the beneficiary of the review result
         Notification::notifyBeneficiaryOfReview(
             $aid->beneficiary_id,
@@ -314,7 +372,7 @@ $aid->stage = 'finance';
         $facilityId = $user->financial_aid_id;
         $perPage = $request->get('per_page', 10);
 
-        $query = AidRequest::with(['beneficiary'])
+        $query = AidRequest::with(['beneficiary', 'reviewer'])
             ->where('status', 'pending')
             ->where('stage', 'finance')
             ->where('finance_decision', 'pending')
@@ -339,6 +397,10 @@ $aid->stage = 'finance';
                         $aid->amount = $currentAmount;
                         $aid->save();
                     }
+                }
+                // Flatten caseworker approver name for frontend convenience
+                if ($aid->relationLoaded('reviewer') && $aid->reviewer) {
+                    $aid->setAttribute('reviewer_name', $aid->reviewer->full_name);
                 }
                 return $aid;
             })
@@ -397,6 +459,30 @@ $aid->stage = 'finance';
         }
 
         $aid->save();
+
+        try {
+            $eventType = $request->status === 'approved' ? 'aid_request_finance_approved' : 'aid_request_finance_rejected';
+            $desc = $request->status === 'approved'
+                ? ('Finance approved aid request: ₱' . number_format((float) $aid->amount, 2) . ' for ' . trim(($aid->beneficiary->firstname ?? '') . ' ' . ($aid->beneficiary->lastname ?? '')))
+                : ('Finance rejected aid request for ' . trim(($aid->beneficiary->firstname ?? '') . ' ' . ($aid->beneficiary->lastname ?? '')));
+            AuditLog::logEvent(
+                $eventType,
+                $desc,
+                [
+                    'aid_request_id' => $aid->id,
+                    'beneficiary_id' => $aid->beneficiary_id,
+                    'beneficiary_name' => trim(($aid->beneficiary->firstname ?? '') . ' ' . ($aid->beneficiary->lastname ?? '')),
+                    'fund_type' => $aid->fund_type,
+                    'amount' => (float) $aid->amount,
+                    'notes' => $request->notes,
+                ],
+                'aid_request',
+                $aid->id,
+                $request->status === 'approved' ? 'high' : 'medium',
+                'financial'
+            );
+        } catch (\Throwable $e) {
+        }
         return response()->json(['success' => true, 'data' => $aid, 'message' => 'Finance review recorded.']);
     }
 
@@ -420,7 +506,7 @@ $aid->stage = 'finance';
         $facilityId = $facility->id;
         $perPage = $request->get('per_page', 10);
 
-        $query = AidRequest::with(['beneficiary'])
+        $query = AidRequest::with(['beneficiary', 'reviewer', 'financeReviewer'])
             ->where('status', 'pending')
             ->where('stage', 'director')
             ->where('finance_decision', 'approved')
@@ -431,7 +517,7 @@ $aid->stage = 'finance';
             ->orderByDesc('created_at');
 
         $page = $query->paginate($perPage);
-        // Recompute COLA amounts for display so director sees current amount
+        // Recompute COLA amounts; also flatten approver names for frontend
         $page->setCollection(
             $page->getCollection()->map(function ($aid) {
                 if ($aid->fund_type === 'cola' && $aid->beneficiary) {
@@ -446,6 +532,12 @@ $aid->stage = 'finance';
                         $aid->amount = $currentAmount;
                         $aid->save();
                     }
+                }
+                if ($aid->relationLoaded('reviewer') && $aid->reviewer) {
+                    $aid->setAttribute('caseworker_name', $aid->reviewer->full_name);
+                }
+                if ($aid->relationLoaded('financeReviewer') && $aid->financeReviewer) {
+                    $aid->setAttribute('finance_name', $aid->financeReviewer->full_name);
                 }
                 return $aid;
             })
@@ -557,6 +649,30 @@ $aid->status = 'approved';
         }
         $aid->stage = 'done';
         $aid->save();
+
+        try {
+            $eventType = $request->status === 'approved' ? 'aid_request_director_approved' : 'aid_request_director_rejected';
+            $desc = $request->status === 'approved'
+                ? ('Director approved aid request: ₱' . number_format((float) $aid->amount, 2) . ' for ' . trim(($aid->beneficiary->firstname ?? '') . ' ' . ($aid->beneficiary->lastname ?? '')))
+                : ('Director rejected aid request for ' . trim(($aid->beneficiary->firstname ?? '') . ' ' . ($aid->beneficiary->lastname ?? '')));
+            AuditLog::logEvent(
+                $eventType,
+                $desc,
+                [
+                    'aid_request_id' => $aid->id,
+                    'beneficiary_id' => $aid->beneficiary_id,
+                    'beneficiary_name' => trim(($aid->beneficiary->firstname ?? '') . ' ' . ($aid->beneficiary->lastname ?? '')),
+                    'fund_type' => $aid->fund_type,
+                    'amount' => (float) $aid->amount,
+                    'notes' => $request->notes,
+                ],
+                'aid_request',
+                $aid->id,
+                $request->status === 'approved' ? 'high' : 'medium',
+                'financial'
+            );
+        } catch (\Throwable $e) {
+        }
 
         return response()->json(['success' => true, 'data' => $aid, 'message' => 'Final decision recorded.']);
     }

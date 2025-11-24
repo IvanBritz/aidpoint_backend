@@ -103,6 +103,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
     // Caseworker review of submissions
     Route::get('beneficiary-document-submissions/pending', [\App\Http\Controllers\BeneficiaryDocumentSubmissionController::class, 'pendingForCaseworker']);
+    Route::get('beneficiary-document-submissions/approved', [\App\Http\Controllers\BeneficiaryDocumentSubmissionController::class, 'approvedByCaseworker']);
     Route::post('beneficiary-document-submissions/{id}/review', [\App\Http\Controllers\BeneficiaryDocumentSubmissionController::class, 'review']);
     
     // Caseworker Routes
