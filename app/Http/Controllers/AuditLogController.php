@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\AuditLog;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
@@ -49,7 +50,12 @@ class AuditLogController extends Controller
         }
 
         if ($category) {
-            $query->byCategory($category);
+            $actorRoles = ['beneficiary','caseworker','finance','director','admin'];
+            if (in_array(strtolower($category), $actorRoles)) {
+                $query->whereRaw('LOWER(user_role) = ?', [strtolower($category)]);
+            } else {
+                $query->byCategory($category);
+            }
         }
 
         if ($riskLevel) {
@@ -98,11 +104,30 @@ class AuditLogController extends Controller
                 break;
                 
             case 'caseworker':
-                // Caseworkers can see logs related to their assigned beneficiaries and their own actions
-                $query->where(function ($q) use ($user) {
+                // Caseworkers: restrict to logs for their assigned beneficiaries and their own actions
+                $assignedBeneficiaryIds = User::where('caseworker_id', $user->id)
+                    ->whereHas('systemRole', function ($q) {
+                        $q->where('name', 'beneficiary');
+                    })
+                    ->pluck('id')
+                    ->all();
+
+                $query->where(function ($q) use ($user, $assignedBeneficiaryIds) {
+                    // Caseworker's own actions
                     $q->where('user_id', $user->id)
-                      ->orWhere('user_role', 'beneficiary')
-                      ->orWhereIn('event_type', ['enrollment_submitted', 'aid_request_submitted', 'liquidation_submitted']);
+                      // Beneficiaries assigned to the caseworker performing actions
+                      ->orWhereIn('user_id', $assignedBeneficiaryIds)
+                      // Logs whose entity explicitly references a beneficiary
+                      ->orWhere(function ($sq) use ($assignedBeneficiaryIds) {
+                          $sq->where('entity_type', 'beneficiary')
+                             ->whereIn('entity_id', $assignedBeneficiaryIds);
+                      })
+                      // Financial/user-management events that include beneficiary_id in event_data
+                      ->orWhere(function ($sq) use ($assignedBeneficiaryIds) {
+                          foreach ($assignedBeneficiaryIds as $bid) {
+                              $sq->orWhere('event_data->beneficiary_id', (int) $bid);
+                          }
+                      });
                 });
                 // Focus on user management and general categories
                 if (!$category) {
@@ -263,9 +288,17 @@ class AuditLogController extends Controller
             ], 403);
         }
 
+        $eventTypes = AuditLog::distinct()->pluck('event_type')->sort()->values()->toArray();
+        $staticEventTypes = [
+            'liquidation_caseworker_approved',
+            'liquidation_director_approved',
+        ];
+        $eventTypes = array_values(array_unique(array_merge($eventTypes, $staticEventTypes)));
+
         $options = [
-            'event_types' => AuditLog::distinct()->pluck('event_type')->sort()->values()->toArray(),
+            'event_types' => $eventTypes,
             'categories' => AuditLog::distinct()->pluck('event_category')->sort()->values()->toArray(),
+            'actor_roles' => AuditLog::distinct()->pluck('user_role')->filter()->map(fn($r) => strtolower($r))->unique()->sort()->values()->toArray(),
             'risk_levels' => ['low', 'medium', 'high', 'critical'],
             'entity_types' => AuditLog::distinct()->whereNotNull('entity_type')->pluck('entity_type')->sort()->values()->toArray(),
         ];

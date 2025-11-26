@@ -118,11 +118,38 @@ class BeneficiaryDocumentSubmissionController extends Controller
             $submission->sao_photo_path = $path;
         }
 
+        // Enforce required documents: Enrollment Certification and SOA
+        if (!$request->hasFile('enrollment_certification') && !$submission->enrollment_certification_path) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Enrollment certification image is required.'
+            ], 422);
+        }
+        if (!$request->hasFile('sao_photo') && !$submission->sao_photo_path) {
+            return response()->json([
+                'success' => false,
+                'message' => 'SOA image is required.'
+            ], 422);
+        }
+
         $submission->status = 'pending'; // reset to pending on (re)submit
         $submission->reviewed_by = null;
         $submission->reviewed_at = null;
         $submission->review_notes = null;
         $submission->save();
+
+        // Log audit event so the assigned caseworker can see it in their audit trail
+        try {
+            \App\Models\AuditLog::logEnrollmentSubmission($user->id, [
+                'submission_id' => $submission->id,
+                'beneficiary_id' => $user->id,
+                'beneficiary_name' => trim(($user->firstname ?? '') . ' ' . ($user->lastname ?? '')),
+                'enrollment_date' => (string) $submission->enrollment_date,
+                'year_level' => $submission->year_level,
+                'is_scholar' => (bool) $submission->is_scholar,
+            ]);
+        } catch (\Throwable $e) {
+        }
 
         // Notify the assigned caseworker
         if ($user->caseworker_id) {
