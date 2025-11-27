@@ -246,9 +246,12 @@ class AuditLog extends Model
         return match (true) {
             str_contains($this->event_type, 'created') => 'bg-green-100 text-green-800',
             str_contains($this->event_type, 'updated') => 'bg-blue-100 text-blue-800',
+            str_contains($this->event_type, 'upgraded') => 'bg-blue-100 text-blue-800',
             str_contains($this->event_type, 'approved') => 'bg-green-100 text-green-800',
+            str_contains($this->event_type, 'activated') => 'bg-cyan-100 text-cyan-800',
             str_contains($this->event_type, 'rejected') => 'bg-red-100 text-red-800',
             str_contains($this->event_type, 'deleted') => 'bg-red-100 text-red-800',
+            str_contains($this->event_type, 'expired') => 'bg-orange-100 text-orange-800',
             str_contains($this->event_type, 'login') => 'bg-purple-100 text-purple-800',
             default => 'bg-gray-100 text-gray-800',
         };
@@ -321,6 +324,71 @@ class AuditLog extends Model
             $beneficiaryData['beneficiary_id'] ?? null,
             'low',
             'user_management'
+        );
+    }
+
+    // Subscription-specific audit log methods
+    public static function logSubscriptionCreated(array $subscriptionData, string $riskLevel = 'medium')
+    {
+        $planName = $subscriptionData['plan_name'] ?? 'Unknown Plan';
+        $amount = $subscriptionData['amount'] ?? 0;
+        
+        return self::logEvent(
+            'subscription_created',
+            "Subscribed to {$planName} plan - ₱" . number_format($amount, 2),
+            $subscriptionData,
+            'subscription',
+            $subscriptionData['subscription_id'] ?? null,
+            $riskLevel,
+            'subscription'
+        );
+    }
+
+    public static function logSubscriptionUpgraded(array $subscriptionData, string $riskLevel = 'medium')
+    {
+        $oldPlan = $subscriptionData['old_plan_name'] ?? 'None';
+        $newPlan = $subscriptionData['new_plan_name'] ?? 'Unknown';
+        $amount = $subscriptionData['amount'] ?? 0;
+        
+        return self::logEvent(
+            'subscription_upgraded',
+            "Upgraded subscription from {$oldPlan} to {$newPlan} - ₱" . number_format($amount, 2),
+            $subscriptionData,
+            'subscription',
+            $subscriptionData['subscription_id'] ?? null,
+            $riskLevel,
+            'subscription'
+        );
+    }
+
+    public static function logFreeTrialActivated(array $trialData, string $riskLevel = 'low')
+    {
+        $planName = $trialData['plan_name'] ?? 'Free Trial';
+        $duration = $trialData['trial_seconds'] ?? 0;
+        
+        return self::logEvent(
+            'free_trial_activated',
+            "Activated free trial: {$planName} ({$duration} seconds)",
+            $trialData,
+            'subscription',
+            $trialData['subscription_id'] ?? null,
+            $riskLevel,
+            'subscription'
+        );
+    }
+
+    public static function logSubscriptionExpired(array $subscriptionData, string $riskLevel = 'medium')
+    {
+        $planName = $subscriptionData['plan_name'] ?? 'Unknown Plan';
+        
+        return self::logEvent(
+            'subscription_expired',
+            "Subscription expired: {$planName}",
+            $subscriptionData,
+            'subscription',
+            $subscriptionData['subscription_id'] ?? null,
+            $riskLevel,
+            'subscription'
         );
     }
 

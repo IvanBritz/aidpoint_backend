@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\AuditLog;
 use App\Models\FinancialAidSubscription;
 use App\Models\SubscriptionPlan;
 use App\Models\SubscriptionTransaction;
@@ -586,6 +587,41 @@ class PayMongoController extends Controller
                 'subscription_id' => $sub->subscription_id,
                 'amount' => $plan->price
             ]);
+
+            // Record subscription in audit log
+            try {
+                $oldPlanName = isset($oldPlanId) ? SubscriptionPlan::find($oldPlanId)?->plan_name : null;
+                
+                if ($oldPlanName) {
+                    // Upgraded/changed plan
+                    AuditLog::logSubscriptionUpgraded([
+                        'subscription_id' => $sub->subscription_id,
+                        'old_plan_id' => $oldPlanId,
+                        'old_plan_name' => $oldPlanName,
+                        'new_plan_id' => $plan->plan_id,
+                        'new_plan_name' => $plan->plan_name,
+                        'amount' => (float) $plan->price,
+                        'payment_method' => $paymentMethod,
+                        'start_date' => $sub->start_date,
+                        'end_date' => $sub->end_date,
+                        'transaction_id' => $transaction->sub_transaction_id,
+                    ]);
+                } else {
+                    // New subscription
+                    AuditLog::logSubscriptionCreated([
+                        'subscription_id' => $sub->subscription_id,
+                        'plan_id' => $plan->plan_id,
+                        'plan_name' => $plan->plan_name,
+                        'amount' => (float) $plan->price,
+                        'payment_method' => $paymentMethod,
+                        'start_date' => $sub->start_date,
+                        'end_date' => $sub->end_date,
+                        'transaction_id' => $transaction->sub_transaction_id,
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                Log::warning('Failed to create audit log for subscription', ['error' => $e->getMessage()]);
+            }
 
             // Restore access for director and all associated users (employees, beneficiaries)
             try {

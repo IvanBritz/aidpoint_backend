@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AuditLog;
 use App\Models\User;
 use App\Models\FinancialAid;
 use App\Models\Notification;
@@ -172,6 +173,22 @@ class CaseworkerController extends Controller
             // Update the beneficiary's caseworker assignment
             $beneficiary->caseworker_id = $caseworker->id;
             $beneficiary->save();
+
+            // Record to audit log for caseworker visibility
+            try {
+                AuditLog::logBeneficiaryAssignment($caseworker->id, [
+                    'beneficiary_id' => $beneficiary->id,
+                    'beneficiary_name' => $beneficiary->full_name,
+                    'caseworker_id' => $caseworker->id,
+                    'caseworker_name' => $caseworker->full_name,
+                    'assigned_by' => $user->full_name,
+                    'facility_id' => $facility->id,
+                ]);
+            } catch (\Throwable $e) {
+                \Log::warning('Failed to create audit log for beneficiary assignment', [
+                    'error' => $e->getMessage(),
+                ]);
+            }
 
             // Notify the caseworker in real-time about the new assignment
             try {

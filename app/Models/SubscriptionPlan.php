@@ -12,6 +12,14 @@ class SubscriptionPlan extends Model
     protected $table = 'subscription_plan';
     protected $primaryKey = 'plan_id';
 
+    /**
+     * Get the route key for the model.
+     */
+    public function getRouteKeyName(): string
+    {
+        return 'plan_id';
+    }
+
     protected $fillable = [
         'plan_name',
         'price',

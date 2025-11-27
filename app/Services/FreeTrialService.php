@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\AuditLog;
 use App\Models\FinancialAidSubscription;
 use App\Models\SubscriptionPlan;
 use App\Models\SubscriptionTransaction;
@@ -62,7 +63,7 @@ class FreeTrialService
             $this->recordFreeTrialTransaction($user, $plan, $subscription);
 
             // Step 4: Log the activation for audit purposes
-            $this->logFreeTrialActivation($user, $plan);
+            $this->logFreeTrialActivation($user, $plan, $subscription);
 
             DB::commit();
 
@@ -220,7 +221,7 @@ class FreeTrialService
     /**
      * Log the free trial activation for audit purposes
      */
-    private function logFreeTrialActivation(User $user, SubscriptionPlan $plan): void
+    private function logFreeTrialActivation(User $user, SubscriptionPlan $plan, FinancialAidSubscription $subscription): void
     {
         Log::info('Free trial activated without webhook', [
             'user_id' => $user->id,
@@ -230,5 +231,20 @@ class FreeTrialService
             'activated_at' => now(),
             'method' => 'direct_server_activation'
         ]);
+
+        // Record to audit log for director visibility
+        try {
+            AuditLog::logFreeTrialActivated([
+                'subscription_id' => $subscription->subscription_id,
+                'plan_id' => $plan->plan_id,
+                'plan_name' => $plan->plan_name,
+                'trial_seconds' => $plan->trial_seconds,
+                'start_date' => $subscription->start_date,
+                'end_date' => $subscription->end_date,
+                'user_id' => $user->id,
+            ]);
+        } catch (\Throwable $e) {
+            Log::warning('Failed to create audit log for free trial', ['error' => $e->getMessage()]);
+        }
     }
 }

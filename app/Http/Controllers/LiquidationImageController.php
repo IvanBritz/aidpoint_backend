@@ -46,11 +46,25 @@ class LiquidationImageController extends Controller
                                   ->whereNotNull('director_approved_at');
                     });
                 });
-            } elseif (in_array($userRole, ['finance', 'director'])) {
-                // Finance and directors can view receipts from their facility
+            } elseif ($userRole === 'finance') {
+                // Finance officers can view receipts from their facility
                 $q->whereHas('beneficiary', function ($beneficiaryQuery) use ($user) {
                     $beneficiaryQuery->where('financial_aid_id', $user->financial_aid_id);
                 });
+            } elseif ($userRole === 'director') {
+                // Directors can view receipts from their owned facility
+                // Director's facility is linked via financial_aid.user_id = director.id
+                $facility = \App\Models\FinancialAid::where('user_id', $user->id)->first();
+                if ($facility) {
+                    $q->whereHas('beneficiary', function ($beneficiaryQuery) use ($facility) {
+                        $beneficiaryQuery->where('financial_aid_id', $facility->id);
+                    });
+                } else {
+                    // Also try using the director's financial_aid_id if set
+                    $q->whereHas('beneficiary', function ($beneficiaryQuery) use ($user) {
+                        $beneficiaryQuery->where('financial_aid_id', $user->financial_aid_id);
+                    });
+                }
             } else {
                 // No access for other roles
                 $q->where('id', -1); // Force no results

@@ -127,33 +127,139 @@ class AuditLogController extends Controller
                           foreach ($assignedBeneficiaryIds as $bid) {
                               $sq->orWhere('event_data->beneficiary_id', (int) $bid);
                           }
-                      });
+                      })
+                      // Events where caseworker_id in event_data matches this caseworker (e.g., beneficiary assignments)
+                      ->orWhere('event_data->caseworker_id', $user->id);
                 });
-                // Focus on user management and general categories
+                
+                // Focus on relevant categories and include all liquidation/disbursement event types
                 if (!$category) {
-                    $query->whereIn('event_category', ['user_management', 'general', 'financial']);
+                    $query->where(function ($q) {
+                        $q->whereIn('event_category', ['user_management', 'general', 'financial'])
+                          ->orWhereIn('event_type', [
+                              // Aid request workflow
+                              'aid_request_submitted', 'aid_request_approved', 'aid_request_rejected',
+                              'aid_request_caseworker_approved', 'aid_request_caseworker_rejected',
+                              'aid_request_finance_approved', 'aid_request_finance_rejected',
+                              'aid_request_director_approved', 'aid_request_director_rejected',
+                              // Disbursement workflow
+                              'disbursement_created', 'disbursement_released', 'disbursement_received',
+                              'disbursement_caseworker_disbursed', 'disbursement_beneficiary_received',
+                              // Liquidation workflow - ALL stages including finance and director
+                              'liquidation_submitted', 'liquidation_approved', 'liquidation_rejected',
+                              'liquidation_caseworker_approved', 'liquidation_caseworker_rejected',
+                              'liquidation_finance_approved', 'liquidation_finance_rejected',
+                              'liquidation_director_approved', 'liquidation_director_rejected',
+                              // Beneficiary assignment
+                              'beneficiary_assigned'
+                          ]);
+                    });
                 }
                 break;
                 
             case 'finance':
-                // Finance officers see financial activities
+                // Finance officers see financial activities for their center/facility
+                $facilityId = $user->financial_aid_id;
+                
+                // Get all user IDs belonging to this facility (beneficiaries, caseworkers, etc.)
+                $facilityUserIds = [];
+                if ($facilityId) {
+                    $facilityUserIds = User::where('financial_aid_id', $facilityId)
+                        ->pluck('id')
+                        ->all();
+                    
+                    // Also include the director (facility owner) who may not have financial_aid_id set
+                    $facilityDirector = \App\Models\FinancialAid::where('id', $facilityId)->first();
+                    if ($facilityDirector && $facilityDirector->user_id) {
+                        $facilityUserIds[] = $facilityDirector->user_id;
+                    }
+                }
+                
+                // Filter by facility users and financial event types
+                $query->where(function ($q) use ($user, $facilityUserIds) {
+                    // Events performed by users in this facility
+                    $q->whereIn('user_id', $facilityUserIds)
+                      // Or events related to entities in this facility (via event_data)
+                      ->orWhere(function ($sq) use ($facilityUserIds) {
+                          foreach ($facilityUserIds as $uid) {
+                              $sq->orWhere('event_data->beneficiary_id', (int) $uid);
+                          }
+                      });
+                });
+                
+                // Focus on financial events: fund requests, liquidations, disbursements
                 if (!$category) {
-                    $query->where('event_category', 'financial');
+                    $query->where(function ($q) {
+                        $q->where('event_category', 'financial')
+                          ->orWhereIn('event_type', [
+                              'fund_created', 'fund_updated', 'fund_allocated',
+                              // Aid request workflow - all stages
+                              'aid_request_submitted', 'aid_request_approved', 'aid_request_rejected',
+                              'aid_request_caseworker_approved', 'aid_request_caseworker_rejected',
+                              'aid_request_finance_approved', 'aid_request_finance_rejected',
+                              'aid_request_director_approved', 'aid_request_director_rejected',
+                              // Disbursement workflow
+                              'disbursement_created', 'disbursement_released', 'disbursement_received',
+                              'disbursement_caseworker_disbursed', 'disbursement_beneficiary_received',
+                              // Liquidation workflow - all stages
+                              'liquidation_submitted', 'liquidation_approved', 'liquidation_rejected',
+                              'liquidation_caseworker_approved', 'liquidation_caseworker_rejected',
+                              'liquidation_finance_approved', 'liquidation_finance_rejected',
+                              'liquidation_director_approved', 'liquidation_director_rejected'
+                          ]);
+                    });
                 }
                 break;
                 
             case 'director':
-                // Directors see activities related to facility management, approvals, and oversight
+                // Directors see activities related to facility management, approvals, oversight, and subscriptions
+                // Get the director's facility
+                $directorFacility = \App\Models\FinancialAid::where('user_id', $user->id)->first();
+                $directorFacilityId = $directorFacility?->id;
+                
+                // Get all user IDs belonging to this facility
+                $directorFacilityUserIds = [];
+                if ($directorFacilityId) {
+                    $directorFacilityUserIds = User::where('financial_aid_id', $directorFacilityId)
+                        ->pluck('id')
+                        ->all();
+                    // Also include the director themselves
+                    $directorFacilityUserIds[] = $user->id;
+                }
+                
+                // Filter by facility users
+                if (!empty($directorFacilityUserIds)) {
+                    $query->where(function ($q) use ($directorFacilityUserIds) {
+                        $q->whereIn('user_id', $directorFacilityUserIds)
+                          ->orWhere(function ($sq) use ($directorFacilityUserIds) {
+                              foreach ($directorFacilityUserIds as $uid) {
+                                  $sq->orWhere('event_data->beneficiary_id', (int) $uid);
+                              }
+                          });
+                    });
+                }
+                
                 if (!$category) {
                     $query->where(function ($q) {
-                        $q->whereIn('event_category', ['user_management', 'financial', 'general'])
+                        $q->whereIn('event_category', ['user_management', 'financial', 'general', 'subscription'])
                           ->orWhereIn('event_type', [
                               'facility_approved', 'facility_updated', 'facility_rejected',
                               'employee_created', 'employee_updated', 'employee_deleted',
                               'beneficiary_enrolled', 'beneficiary_updated', 
                               'role_assigned', 'role_updated',
-                              'fund_allocated', 'fund_updated', 'liquidation_approved', 'liquidation_rejected',
-                              'final_approval_submitted', 'final_approval_completed'
+                              'fund_allocated', 'fund_updated', 'fund_created',
+                              'aid_request_submitted', 'aid_request_approved', 'aid_request_rejected',
+                              'aid_request_caseworker_approved', 'aid_request_caseworker_rejected',
+                              'aid_request_finance_approved', 'aid_request_finance_rejected',
+                              'aid_request_director_approved', 'aid_request_director_rejected',
+                              'disbursement_created', 'disbursement_released', 'disbursement_received',
+                              'disbursement_caseworker_disbursed', 'disbursement_beneficiary_received',
+                              'liquidation_submitted', 'liquidation_approved', 'liquidation_rejected',
+                              'liquidation_caseworker_approved', 'liquidation_caseworker_rejected',
+                              'liquidation_finance_approved', 'liquidation_finance_rejected',
+                              'liquidation_director_approved', 'liquidation_director_rejected',
+                              'final_approval_submitted', 'final_approval_completed',
+                              'subscription_created', 'subscription_upgraded', 'free_trial_activated', 'subscription_expired'
                           ]);
                     });
                 }

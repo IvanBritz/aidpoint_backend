@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AuditLog;
 use App\Models\User;
 use App\Models\FinancialAid;
 use App\Models\Notification;
@@ -157,6 +158,23 @@ class BeneficiaryController extends Controller
                 \Log::info('Notification created', ['notification_id' => $notification->id, 'caseworker_id' => $caseworker->id]);
             } catch (\Exception $e) {
                 \Log::error('Notification failed', ['error' => $e->getMessage()]);
+            }
+
+            // Record to audit log for caseworker visibility
+            try {
+                AuditLog::logBeneficiaryAssignment($caseworker->id, [
+                    'beneficiary_id' => $beneficiary->id,
+                    'beneficiary_name' => $beneficiary->firstname . ' ' . $beneficiary->lastname,
+                    'caseworker_id' => $caseworker->id,
+                    'caseworker_name' => $caseworker->full_name,
+                    'assigned_by' => $user->full_name,
+                    'facility_id' => $facility->id,
+                    'is_new_beneficiary' => true,
+                ]);
+            } catch (\Throwable $e) {
+                \Log::warning('Failed to create audit log for beneficiary assignment', [
+                    'error' => $e->getMessage(),
+                ]);
             }
 
             return response()->json([

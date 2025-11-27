@@ -120,10 +120,30 @@ class LiquidationApprovalController extends Controller
         }
 
         $liquidation->submitForApproval();
+        $liquidation->load(['beneficiary', 'disbursement.aidRequest']);
+
+        // Create audit log for liquidation submission
+        try {
+            $beneficiaryName = trim(($liquidation->beneficiary->firstname ?? '') . ' ' . ($liquidation->beneficiary->lastname ?? ''));
+            $amount = (float) ($liquidation->total_disbursed_amount ?? $liquidation->disbursement?->aidRequest?->amount ?? 0);
+            
+            AuditLog::logLiquidationSubmitted($liquidation->id, [
+                'liquidation_id' => $liquidation->id,
+                'beneficiary_id' => $liquidation->beneficiary_id,
+                'beneficiary_name' => $beneficiaryName,
+                'amount' => $amount,
+                'disbursement_type' => $liquidation->disbursement_type,
+                'total_receipts' => $liquidation->receipts()->count(),
+            ]);
+        } catch (\Throwable $e) {
+            \Log::warning('Failed to create audit log for liquidation submission', [
+                'error' => $e->getMessage(),
+                'liquidation_id' => $liquidation->id,
+            ]);
+        }
 
         // Notify assigned caseworker that a liquidation needs their approval
         try {
-            $liquidation->load(['beneficiary', 'disbursement.aidRequest']);
             $caseworkerId = $liquidation->beneficiary?->caseworker_id;
             if ($caseworkerId) {
                 $payload = [
@@ -172,10 +192,38 @@ class LiquidationApprovalController extends Controller
         }
 
         $liquidation->approveByCaseworker($user->id, $request->notes);
+        $liquidation->load('beneficiary');
+
+        // Create audit log for caseworker approval
+        try {
+            $beneficiaryName = trim(($liquidation->beneficiary->firstname ?? '') . ' ' . ($liquidation->beneficiary->lastname ?? ''));
+            $approverName = trim(($user->firstname ?? '') . ' ' . ($user->lastname ?? ''));
+            
+            AuditLog::logEvent(
+                'liquidation_caseworker_approved',
+                "Caseworker approved liquidation for {$beneficiaryName}",
+                [
+                    'liquidation_id' => $liquidation->id,
+                    'beneficiary_id' => $liquidation->beneficiary_id,
+                    'beneficiary_name' => $beneficiaryName,
+                    'amount' => (float) ($liquidation->total_disbursed_amount ?? 0),
+                    'approver_name' => $approverName,
+                    'notes' => $request->notes,
+                ],
+                'liquidation',
+                $liquidation->id,
+                'medium',
+                'financial'
+            );
+        } catch (\Throwable $e) {
+            \Log::warning('Failed to create audit log for caseworker liquidation approval', [
+                'error' => $e->getMessage(),
+                'liquidation_id' => $liquidation->id,
+            ]);
+        }
 
         // Realtime: notify finance officers in this facility
         try {
-            $liquidation->load('beneficiary');
             $facilityId = $liquidation->beneficiary?->financial_aid_id;
             if ($facilityId) {
                 $financeIds = User::whereHas('systemRole', function($q){ $q->where('name','finance'); })
@@ -258,6 +306,8 @@ class LiquidationApprovalController extends Controller
         // Log the finance approval
         try {
             $liquidationData = [
+                'liquidation_id' => $liquidation->id,
+                'beneficiary_id' => $liquidation->beneficiary_id,
                 'amount' => $liquidation->total_disbursed_amount,
                 'beneficiary_name' => $liquidation->beneficiary->firstname . ' ' . $liquidation->beneficiary->lastname,
                 'approver_name' => $user->firstname . ' ' . $user->lastname,
@@ -270,7 +320,8 @@ class LiquidationApprovalController extends Controller
                 $liquidationData,
                 'liquidation',
                 $liquidation->id,
-                'high'
+                'high',
+                'financial'
             );
             
             // Notify beneficiary
@@ -371,6 +422,8 @@ class LiquidationApprovalController extends Controller
         try {
             $liquidation->load('beneficiary');
             $payload = [
+                'liquidation_id' => $liquidation->id,
+                'beneficiary_id' => $liquidation->beneficiary_id,
                 'amount' => (float) ($liquidation->total_disbursed_amount ?? 0),
                 'beneficiary_name' => trim(($liquidation->beneficiary->firstname ?? '') . ' ' . ($liquidation->beneficiary->lastname ?? '')),
                 'approver_name' => trim(($user->firstname ?? '') . ' ' . ($user->lastname ?? '')),
