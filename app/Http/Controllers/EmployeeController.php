@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use App\Models\FinancialAid;
 use App\Models\SystemRole;
+use App\Models\AuditLog;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
@@ -118,7 +119,7 @@ class EmployeeController extends Controller
             return response()->json(['success' => false, 'message' => 'No facility found'], 404);
         }
 
-        $employee = User::where('financial_aid_id', $facility->id)->findOrFail($id);
+        $employee = User::where('financial_aid_id', $facility->id)->with('systemRole')->findOrFail($id);
         $originalStatus = $employee->status;
 
         $request->validate([
@@ -139,6 +140,65 @@ class EmployeeController extends Controller
 
         $employee->fill($request->only(['firstname','middlename','lastname','contact_number','address','email','status']));
         $employee->save();
+
+        // Log status changes to audit log
+        if ($originalStatus !== $employee->status) {
+            $employeeName = trim(($employee->firstname ?? '') . ' ' . ($employee->middlename ?? '') . ' ' . ($employee->lastname ?? ''));
+            $currentUserName = trim(($current->firstname ?? '') . ' ' . ($current->middlename ?? '') . ' ' . ($current->lastname ?? ''));
+            $currentUserRole = $current->systemRole->name ?? 'unknown';
+            
+            if ($employee->status === 'inactive' && $originalStatus === 'active') {
+                // Employee archived
+                try {
+                    AuditLog::logEvent(
+                        'employee_archived',
+                        "Employee archived: {$employeeName} ({$employee->email}) by {$currentUserName}",
+                        [
+                            'employee_id' => $employee->id,
+                            'employee_name' => $employeeName,
+                            'employee_email' => $employee->email,
+                            'employee_role' => $employee->systemRole->name ?? 'unknown',
+                            'performed_by_id' => $current->id,
+                            'performed_by_name' => $currentUserName,
+                            'performed_by_role' => $currentUserRole,
+                            'facility_id' => $facility->id,
+                            'facility_name' => $facility->center_name,
+                        ],
+                        'user',
+                        $employee->id,
+                        'medium',
+                        'user_management'
+                    );
+                } catch (\Throwable $e) {
+                    \Log::warning('Failed to create audit log for employee archive', ['error' => $e->getMessage()]);
+                }
+            } elseif ($employee->status === 'active' && $originalStatus === 'inactive') {
+                // Employee activated
+                try {
+                    AuditLog::logEvent(
+                        'employee_activated',
+                        "Employee activated: {$employeeName} ({$employee->email}) by {$currentUserName}",
+                        [
+                            'employee_id' => $employee->id,
+                            'employee_name' => $employeeName,
+                            'employee_email' => $employee->email,
+                            'employee_role' => $employee->systemRole->name ?? 'unknown',
+                            'performed_by_id' => $current->id,
+                            'performed_by_name' => $currentUserName,
+                            'performed_by_role' => $currentUserRole,
+                            'facility_id' => $facility->id,
+                            'facility_name' => $facility->center_name,
+                        ],
+                        'user',
+                        $employee->id,
+                        'medium',
+                        'user_management'
+                    );
+                } catch (\Throwable $e) {
+                    \Log::warning('Failed to create audit log for employee activation', ['error' => $e->getMessage()]);
+                }
+            }
+        }
 
         // If a caseworker is being archived (status active -> inactive), unassign all their beneficiaries
         if ($originalStatus === 'active' && $employee->status === 'inactive') {
@@ -163,7 +223,11 @@ class EmployeeController extends Controller
             return response()->json(['success' => false, 'message' => 'No facility found'], 404);
         }
 
-        $employee = User::where('financial_aid_id', $facility->id)->findOrFail($id);
+        $employee = User::where('financial_aid_id', $facility->id)->with('systemRole')->findOrFail($id);
+
+        $employeeName = trim(($employee->firstname ?? '') . ' ' . ($employee->middlename ?? '') . ' ' . ($employee->lastname ?? ''));
+        $currentUserName = trim(($current->firstname ?? '') . ' ' . ($current->middlename ?? '') . ' ' . ($current->lastname ?? ''));
+        $currentUserRole = $current->systemRole->name ?? 'unknown';
 
         // Archive employee by marking status as inactive instead of deleting any related data
         $employee->status = 'inactive';
@@ -171,6 +235,31 @@ class EmployeeController extends Controller
 
         // Also unassign beneficiaries if this employee is a caseworker
         $this->unassignBeneficiariesForCaseworker($employee);
+
+        // Log to audit log
+        try {
+            AuditLog::logEvent(
+                'employee_archived',
+                "Employee archived: {$employeeName} ({$employee->email}) by {$currentUserName}",
+                [
+                    'employee_id' => $employee->id,
+                    'employee_name' => $employeeName,
+                    'employee_email' => $employee->email,
+                    'employee_role' => $employee->systemRole->name ?? 'unknown',
+                    'performed_by_id' => $current->id,
+                    'performed_by_name' => $currentUserName,
+                    'performed_by_role' => $currentUserRole,
+                    'facility_id' => $facility->id,
+                    'facility_name' => $facility->center_name,
+                ],
+                'user',
+                $employee->id,
+                'medium',
+                'user_management'
+            );
+        } catch (\Throwable $e) {
+            \Log::warning('Failed to create audit log for employee archive', ['error' => $e->getMessage()]);
+        }
 
         return response()->json(['success' => true, 'message' => 'Employee archived successfully.']);
     }

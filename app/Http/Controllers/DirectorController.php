@@ -9,6 +9,7 @@ use App\Models\Liquidation;
 use App\Models\BeneficiaryDocumentSubmission;
 use App\Models\AuditLog;
 use App\Models\FinancialAid;
+use App\Models\SystemRole;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -627,6 +628,239 @@ class DirectorController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => 'Error retrieving facility analytics: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get all employees for the director's facility
+     */
+    public function getEmployees()
+    {
+        $user = Auth::user();
+        if (!$user || !$user->systemRole) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Authentication required.'
+            ], 401);
+        }
+
+        $userRole = strtolower($user->systemRole->name ?? '');
+        if ($userRole !== 'director') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Access denied. Director privileges required.'
+            ], 403);
+        }
+
+        try {
+            $facility = FinancialAid::where('user_id', $user->id)->first();
+            if (!$facility && $user->financial_aid_id) {
+                $facility = FinancialAid::find($user->financial_aid_id);
+            }
+            
+            if (!$facility) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No facility found for this director.'
+                ], 404);
+            }
+
+            // Get all employees (caseworkers and finance) under this facility
+            $employees = User::whereHas('systemRole', function ($query) {
+                $query->whereIn('name', ['caseworker', 'finance']);
+            })
+            ->where('financial_aid_id', $facility->id)
+            ->with('systemRole')
+            ->orderBy('created_at', 'desc')
+            ->get();
+
+            return response()->json([
+                'success' => true,
+                'data' => $employees,
+                'message' => 'Employees retrieved successfully.'
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error retrieving employees: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Activate an employee (restore from archived status)
+     */
+    public function activateEmployee($id)
+    {
+        $user = Auth::user();
+        if (!$user || !$user->systemRole) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Authentication required.'
+            ], 401);
+        }
+
+        $userRole = strtolower($user->systemRole->name ?? '');
+        if ($userRole !== 'director') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Access denied. Director privileges required.'
+            ], 403);
+        }
+
+        try {
+            $facility = FinancialAid::where('user_id', $user->id)->first();
+            if (!$facility && $user->financial_aid_id) {
+                $facility = FinancialAid::find($user->financial_aid_id);
+            }
+            
+            if (!$facility) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No facility found for this director.'
+                ], 404);
+            }
+
+            $employee = User::where('financial_aid_id', $facility->id)
+                ->whereHas('systemRole', function ($query) {
+                    $query->whereIn('name', ['caseworker', 'finance']);
+                })
+                ->findOrFail($id);
+
+            $employeeName = trim(($employee->firstname ?? '') . ' ' . ($employee->middlename ?? '') . ' ' . ($employee->lastname ?? ''));
+            $directorName = trim(($user->firstname ?? '') . ' ' . ($user->middlename ?? '') . ' ' . ($user->lastname ?? ''));
+
+            // Activate employee by removing deleted_at (soft delete restoration)
+            $employee->deleted_at = null;
+            $employee->save();
+
+            // Log to audit log
+            try {
+                AuditLog::logEvent(
+                    'employee_activated',
+                    "Employee activated: {$employeeName} ({$employee->email}) by {$directorName}",
+                    [
+                        'employee_id' => $employee->id,
+                        'employee_name' => $employeeName,
+                        'employee_email' => $employee->email,
+                        'employee_role' => $employee->systemRole->name ?? 'unknown',
+                        'director_id' => $user->id,
+                        'director_name' => $directorName,
+                        'facility_id' => $facility->id,
+                        'facility_name' => $facility->center_name,
+                    ],
+                    'user',
+                    $employee->id,
+                    'medium',
+                    'user_management'
+                );
+            } catch (\Throwable $e) {
+                \Log::warning('Failed to create audit log for employee activation', ['error' => $e->getMessage()]);
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $employee->load('systemRole'),
+                'message' => 'Employee activated successfully.'
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error activating employee: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Deactivate (archive) an employee
+     */
+    public function deactivateEmployee($id)
+    {
+        $user = Auth::user();
+        if (!$user || !$user->systemRole) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Authentication required.'
+            ], 401);
+        }
+
+        $userRole = strtolower($user->systemRole->name ?? '');
+        if ($userRole !== 'director') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Access denied. Director privileges required.'
+            ], 403);
+        }
+
+        try {
+            $facility = FinancialAid::where('user_id', $user->id)->first();
+            if (!$facility && $user->financial_aid_id) {
+                $facility = FinancialAid::find($user->financial_aid_id);
+            }
+            
+            if (!$facility) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No facility found for this director.'
+                ], 404);
+            }
+
+            $employee = User::where('financial_aid_id', $facility->id)
+                ->whereHas('systemRole', function ($query) {
+                    $query->whereIn('name', ['caseworker', 'finance']);
+                })
+                ->findOrFail($id);
+
+            $employeeName = trim(($employee->firstname ?? '') . ' ' . ($employee->middlename ?? '') . ' ' . ($employee->lastname ?? ''));
+            $directorName = trim(($user->firstname ?? '') . ' ' . ($user->middlename ?? '') . ' ' . ($user->lastname ?? ''));
+
+            // Archive employee by setting deleted_at (soft delete)
+            $employee->deleted_at = now();
+            $employee->save();
+
+            // If employee is a caseworker, unassign all their beneficiaries
+            $caseworkerRoleId = SystemRole::where('name', 'caseworker')->value('id');
+            if ((int) $employee->systemrole_id === (int) $caseworkerRoleId) {
+                User::where('caseworker_id', $employee->id)->update(['caseworker_id' => null]);
+            }
+
+            // Log to audit log
+            try {
+                AuditLog::logEvent(
+                    'employee_archived',
+                    "Employee archived: {$employeeName} ({$employee->email}) by {$directorName}",
+                    [
+                        'employee_id' => $employee->id,
+                        'employee_name' => $employeeName,
+                        'employee_email' => $employee->email,
+                        'employee_role' => $employee->systemRole->name ?? 'unknown',
+                        'director_id' => $user->id,
+                        'director_name' => $directorName,
+                        'facility_id' => $facility->id,
+                        'facility_name' => $facility->center_name,
+                    ],
+                    'user',
+                    $employee->id,
+                    'medium',
+                    'user_management'
+                );
+            } catch (\Throwable $e) {
+                \Log::warning('Failed to create audit log for employee archive', ['error' => $e->getMessage()]);
+            }
+
+            return response()->json([
+                'success' => true,
+                'data' => $employee->load('systemRole'),
+                'message' => 'Employee archived successfully.'
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Error archiving employee: ' . $e->getMessage()
             ], 500);
         }
     }

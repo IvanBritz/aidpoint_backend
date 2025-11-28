@@ -247,6 +247,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::get('director/staff-performance', [\App\Http\Controllers\DirectorController::class, 'staffPerformance']);
     Route::get('director/facility-analytics', [\App\Http\Controllers\DirectorController::class, 'facilityAnalytics']);
     
+    // Director employee management
+    Route::get('director/employees', [\App\Http\Controllers\DirectorController::class, 'getEmployees']);
+    Route::put('director/employees/{id}/activate', [\App\Http\Controllers\DirectorController::class, 'activateEmployee']);
+    Route::put('director/employees/{id}/deactivate', [\App\Http\Controllers\DirectorController::class, 'deactivateEmployee']);
+    
     // Receipt debugging route (authenticated)
     Route::get('debug/liquidations/{liquidationId}/receipts/{receiptId}/info', [\App\Http\Controllers\LiquidationImageController::class, 'debugReceipt']);
     
