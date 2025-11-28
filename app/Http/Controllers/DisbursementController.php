@@ -621,7 +621,13 @@ class DisbursementController extends Controller
         }
 
         $userRole = strtolower($user->systemRole->name);
-        $query = Disbursement::with(['aidRequest.beneficiary']);
+        // Include user relationships for finance dispenser, caseworker receiver, and caseworker dispenser
+        $query = Disbursement::with([
+            'aidRequest.beneficiary',
+            'financeDispenser',
+            'caseworkerReceiver',
+            'caseworkerDispenser'
+        ]);
 
         switch ($userRole) {
             case 'finance':
